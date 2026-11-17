@@ -70,7 +70,7 @@ The cost is that a helper's shell does not stay in its worktree between commands
 
 ## How it was tested
 
-`scripts/selftest.sh` (19 checks) covers the board's rules with real processes in a temp repo:
+`scripts/selftest.sh` (21 checks) covers the board's rules with real processes in a temp repo:
 
 - one name per worktree, rejoin, `claim --wait`, and six parallel claims with no double claim;
 - the queue's refusals: conflict, protected path (including a rename out of one), gate failure and green regression;

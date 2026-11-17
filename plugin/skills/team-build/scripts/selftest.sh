@@ -207,6 +207,21 @@ out=$(cd "$(wtp h1)" && $B claim)
 grep -q "^Claimed T$C" <<<"$out" || die "the piece should open once its parent lands: $out"
 ok "a piece of a split task opens only after its parent lands"
 
+# A branch that is only a newer trunk (a rebase dropped every commit) is not landed work.
+out=$(cd "$(wtp h2)" && git switch -q -c h2/empty team/t && $B submit 7 2>&1 || true)
+grep -q "nothing to land" <<<"$out" || die "a branch that is only a newer trunk must not count as landed work: $out"
+[ "$(q "SELECT status FROM tasks WHERE id = 7")" = claimed ] || die "T7 must stay claimed"
+ok "a branch that is only a newer trunk is not landed work"
+
+# Dropping a task frees the tasks that wait for it.
+D=$($B add --milestone M3 --title "drop me" | sed -E 's/^T([0-9]+).*/\1/')
+$B add --milestone M3 --title waits --after "$D" >/dev/null
+W=$(q "SELECT id FROM tasks WHERE after = $D")
+out=$($B drop "$D" --reason test)
+grep -q "T$W" <<<"$out" || die "drop should name the tasks it freed: $out"
+[ -z "$(q "SELECT after FROM tasks WHERE id = $W")" ] || die "drop should free the tasks that waited for it"
+ok "dropping a task frees the tasks that wait for it"
+
 # A landing cut short after trunk moved, but before the board recorded it, is finished on restart.
 git worktree add -q "$REPO/.team-build/lead-c" -b lead/c team/t
 (cd "$REPO/.team-build/lead-c" && echo c > crash.txt && git add crash.txt && git commit -qm crash)

@@ -18,6 +18,7 @@ import contextlib
 import fcntl
 import os
 import re
+import shlex
 import signal
 import sqlite3
 import subprocess
@@ -352,6 +353,8 @@ def loop_pid(conn):
 def run_cmd(cmd, cwd, timeout, log_path) -> int:
     """Run a shell command, append its output to log_path, kill its whole
     process group on timeout. Returns the exit code (124 on timeout)."""
+    if STOP["requested"]:
+        raise Interrupted()
     with open(log_path, "ab") as log:
         log.write(("\n$ %s\n" % cmd).encode())
         log.flush()
@@ -361,12 +364,18 @@ def run_cmd(cmd, cwd, timeout, log_path) -> int:
         )
         STOP["pgid"] = p.pid
         try:
+            if STOP["requested"]:
+                kill_group(p.pid)
             rc = p.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             kill_group(p.pid)
             p.wait()
             log.write(("\n[team-build] timed out after %d s\n" % timeout).encode())
             rc = 124
+        except BaseException:
+            # Ctrl-C and other exits: the command runs in its own session, so stop it here.
+            kill_group(p.pid)
+            raise
         finally:
             STOP["pgid"] = None
     if STOP["requested"]:
@@ -642,8 +651,9 @@ def cmd_preflight(a):
             else:
                 print("%s: fails as expected (exit %d). Why:" % (m["id"], rc))
                 print(indent(failure_lines(log), "    "))
-        # The gate and checks may rewrite tracked files (lock files, formatters).
+        # The gate and checks may rewrite or add files (lock files, formatters, reports).
         git("reset", "--quiet", "--hard", "HEAD", cwd=tdir)
+        git("clean", "-ffdq", cwd=tdir)
     print("STUB markers on trunk: %d" % stub_count(cfg(conn, "trunk")))
     with tx(conn):
         log_event(conn, "lead", "preflight", "ok" if ok else "failed")
@@ -710,13 +720,14 @@ def cmd_hire(a):
     helper_md = os.path.join(os.path.dirname(os.path.dirname(board)), "HELPER.md")
     print("Worktree for %s: %s" % (a.name, wt))
     print("Spawn prompt:")
-    cmd = "python3 " + board
+    cmd = "python3 " + shlex.quote(board)
+    cd = "cd %s && " % shlex.quote(wt)
     print(
         "You are helper {n} in a team build. Your worktree is {wt}. Start every shell command "
-        "with `cd {wt} && `, and read and edit files only under that path. "
+        "with `{cd}`, and read and edit files only under that path. "
         "The board command is `{cmd}`; type it in full each time. "
-        "Read {md} and follow it. Start with: cd {wt} && {cmd} join {n}".format(
-            n=a.name, wt=wt, md=helper_md, cmd=cmd)
+        "Read {md} and follow it. Start with: {cd}{cmd} join {n}".format(
+            n=a.name, wt=wt, md=helper_md, cmd=cmd, cd=cd)
     )
 
 
@@ -860,7 +871,7 @@ def print_task(conn, t, me_name, resumed=False):
         print(indent(t["last_reason"]))
     print("Milestone check: %s" % m["check_cmd"])
     mine = "%s/t%d" % (me_name, t["id"])
-    g = "git -C %s" % worktree_root()
+    g = "git -C %s" % shlex.quote(worktree_root())
     if t["branch"] == mine:
         steps = ["%s switch %s" % (g, mine), "%s rebase %s" % (g, trunk)]
     elif t["branch"]:
@@ -882,9 +893,13 @@ def cmd_claim(a):
         rc = try_claim(conn, a)
         if rc != NO_WORK:
             return rc
+        # Work can still appear while a milestone is red (captains split it) or a task is
+        # claimed (its helper may split it), or is open but waiting for another task.
         pending = conn.execute(
             "SELECT (SELECT COUNT(*) FROM milestones WHERE status = 'red') + "
-            "(SELECT COUNT(*) FROM tasks WHERE status IN ('open', 'claimed', 'queued', 'refused'))"
+            "(SELECT COUNT(*) FROM tasks WHERE status = 'claimed') + "
+            "(SELECT COUNT(*) FROM tasks t JOIN milestones m ON m.id = t.milestone "
+            "WHERE t.status = 'open' AND m.status IN ('red', 'green'))"
         ).fetchone()[0]
         if time.time() >= deadline or pending == 0:
             print("No open work%s%s." % (
@@ -998,8 +1013,13 @@ def cmd_drop(a):
             "UPDATE tasks SET status = 'dropped', last_reason = ?, updated_at = ? WHERE id = ?",
             (a.reason, now(), t["id"]),
         )
+        freed = [r["id"] for r in conn.execute("SELECT id FROM tasks WHERE after = ? AND status = 'open'", (t["id"],))]
+        conn.execute("UPDATE tasks SET after = NULL WHERE after = ?", (t["id"],))
         log_event(conn, "lead", "dropped", "T%d: %s" % (t["id"], a.reason))
     print("T%d dropped." % t["id"])
+    if freed:
+        print("These tasks waited for it and are open now: %s. Drop them too if they need T%d."
+              % (", ".join("T%d" % i for i in freed), t["id"]))
 
 
 def cmd_note(a):
@@ -1050,14 +1070,17 @@ def cmd_submit(a):
             if held is None:
                 raise Fail("you hold no claimed task. Give the task ID.")
             task_id = held["id"]
-        untracked = [ln[3:] for ln in git("status", "--porcelain", cwd=wt).splitlines() if ln.startswith("?? ")]
+        untracked = untracked_files(wt)
         if untracked:
             print("Note: untracked files are not part of the submission: %s" % ", ".join(untracked[:10]))
     if is_ancestor(sha, trunk):
         if me["role"] != "lead" and task_id is not None:
             t = get_task(conn, task_id)
+            # The queue's own landings form trunk's first-parent line. A HEAD on that line is
+            # just a newer trunk (for example after a rebase dropped every commit), not work.
+            landings = git("rev-list", "--first-parent", "%s..%s" % (t["base"], trunk)).split() if t["base"] else []
             if t["owner"] == me["name"] and t["status"] == "claimed" and t["base"] \
-                    and sha != t["base"] and not is_ancestor(sha, t["base"]):
+                    and sha != t["base"] and not is_ancestor(sha, t["base"]) and sha not in landings:
                 with tx(conn):
                     conn.execute("UPDATE tasks SET status = 'landed', branch = ?, updated_at = ? WHERE id = ?",
                                  (branch, now(), t["id"]))
@@ -1075,7 +1098,7 @@ def cmd_submit(a):
                 raise Fail("T%d is %s%s. The lead can take over only an open or refused task." % (
                     t["id"], t["status"], " by " + t["owner"] if t["owner"] else ""))
             conn.execute(
-                "UPDATE tasks SET status = 'queued', owner = COALESCE(owner, ?), branch = ?, updated_at = ? WHERE id = ?",
+                "UPDATE tasks SET status = 'queued', owner = ?, branch = ?, updated_at = ? WHERE id = ?",
                 (me["name"], branch, now(), t["id"]),
             )
         cur = conn.execute(
@@ -1299,9 +1322,9 @@ def refuse(conn, sub, reason, log_path, actor="queue"):
             t = get_task(conn, sub["task"])
             if t["status"] == "queued":
                 owner = conn.execute(
-                    "SELECT state FROM agents WHERE name = ?", (t["owner"],)
+                    "SELECT role, state FROM agents WHERE name = ?", (t["owner"],)
                 ).fetchone() if t["owner"] else None
-                if owner is not None and owner["state"] == "active":
+                if owner is not None and owner["role"] == "helper" and owner["state"] == "active":
                     conn.execute(
                         "UPDATE tasks SET status = 'refused', refusals = refusals + 1, last_reason = ?, updated_at = ? WHERE id = ?",
                         (reason, now(), t["id"]),
@@ -1350,7 +1373,6 @@ def merge_one(conn) -> bool:
         if sub is None:
             return False
         conn.execute("UPDATE landed SET status = 'merging' WHERE id = ?", (sub["id"],))
-        set_cfg(conn, "merging", "L%d" % sub["id"])
     # Clear the marker on every outcome except a crash: refusals and the
     # trunk-moved stop all leave the trunk worktree clean at a known commit.
     finished = False
@@ -1436,6 +1458,8 @@ def attempt_landing(conn, sub) -> bool:
     tdir = cfg(conn, "trunk_dir")
     log_path = board_dir() / "logs" / ("L%d.log" % sub["id"])
     with trunk_lock():
+        with tx(conn):
+            set_cfg(conn, "merging", "L%d" % sub["id"])
         tip = rev(trunk)
         if tip != cfg(conn, "trunk_tip"):
             with tx(conn):
@@ -1456,7 +1480,8 @@ def attempt_landing(conn, sub) -> bool:
         submitter = conn.execute("SELECT role FROM agents WHERE name = ?", (sub["agent"],)).fetchone()
         if submitter is None or submitter["role"] != "lead":
             changed = git("diff", "--name-only", "--no-renames", "%s...%s" % (tip, sha)).splitlines()
-            hit = [f for f in changed if is_protected(f, protect_globs(conn))]
+            globs = protect_globs(conn)
+            hit = [f for f in changed if is_protected(f, globs)]
             if hit:
                 refuse(conn, sub, "protected paths changed: %s. Only the lead may change them. "
                        "Remove these changes, and post a question note if a check or gate is wrong." % ", ".join(hit), None)
@@ -1601,12 +1626,13 @@ def cmd_recheck(a):
         on_branch = run_git(["symbolic-ref", "--quiet", "HEAD"], cwd=tdir, check=False).returncode == 0
         if on_branch:
             # Before the first merge loop the lead builds the skeleton here, on the branch.
-            if dirty(tdir):
-                raise Fail("the trunk worktree has uncommitted changes. Commit or discard them first.")
+            if dirty(tdir) or untracked_files(tdir):
+                raise Fail("the trunk worktree has uncommitted changes or new files. Commit or remove them first.")
         else:
             prepare_trunk_dir(conn, tdir, tip)
         results = judge(conn, rows, tdir, tip, log, "lead")
         git("reset", "--quiet", "--hard", "HEAD", cwd=tdir)
+        git("clean", "-ffdq", cwd=tdir)
     all_green = True
     for m, rc, stubs in results:
         ok = rc == 0 and not stubs
