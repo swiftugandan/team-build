@@ -202,8 +202,11 @@ code, pre, .mono { font-family: var(--mono); font-size: 0.875em; }
   background: var(--ink); color: var(--on-ink); border-radius: 4px;
   padding: 0.85rem 0.75rem 0.85rem 1.1rem;
 }
-/* Commands never wrap mid-word: a long one scrolls inside its box. */
-.cmd pre { flex: 1; min-width: 0; margin: 0; font-size: 0.8125rem; white-space: pre; overflow-x: auto; line-height: 1.75; }
+/* Each command wraps only at spaces, with a hanging indent so a wrapped line
+   reads as a continuation. The Copy button copies the exact text. */
+.cmd pre { flex: 1; min-width: 0; margin: 0; overflow-x: auto; line-height: 1.75; }
+.cmd .line { display: block; font-size: 0.8125rem; white-space: pre-wrap; overflow-wrap: normal; padding-left: 1.5em; text-indent: -1.5em; }
+.cmd .line span { white-space: nowrap; }
 .copy {
   flex: none;
   font: 700 0.8125rem var(--sans); color: var(--on-ink);

@@ -1,0 +1,27 @@
+<!doctype html>
+<!-- Source for site/og.png, the social preview. `make og` puts the track diagram
+     from site/index.html where the YARD comment is, then renders 1200x630. -->
+<html lang="en"><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Overpass:wght@400;700;800&family=Overpass+Mono:wght@400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../site/styles.css">
+<style>
+  html, body { width: 1200px; height: 630px; overflow: hidden; margin: 0; }
+  body { padding: 52px 72px 0; box-sizing: border-box; background: var(--panel); }
+  .wordmark { font-size: 1.5rem; }
+  .wordmark svg { width: 2rem; height: 2rem; }
+  h1 { margin: 22px 0 0; font-weight: 800; font-size: 3.6rem; line-height: 1.05; letter-spacing: -0.025em; color: var(--ink); }
+  .yard { margin: 30px 0 0; border: 0; background: none; }
+</style></head>
+<body>
+  <span class="wordmark">
+    <svg viewBox="0 0 32 32" aria-hidden="true">
+      <rect x="9" y="2" width="14" height="24" rx="7" fill="currentColor"/>
+      <circle cx="16" cy="9" r="4" fill="var(--lamp-off)"/>
+      <circle cx="16" cy="19" r="4" fill="var(--green)"/>
+      <rect x="15" y="26" width="2" height="5" fill="currentColor"/>
+    </svg>
+    team-build
+  </span>
+  <h1>A crew of agents builds it.<br>The checks decide what lands.</h1>
+  <div class="yard"><!-- YARD --></div>
+</body></html>

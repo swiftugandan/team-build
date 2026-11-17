@@ -21,9 +21,11 @@ lint:
 		python3 -m json.tool $$f >/dev/null || exit 1; echo "ok $$f"; done
 
 og:
+	python3 design/og.py
 	"$(CHROME)" --headless=new --hide-scrollbars --force-device-scale-factor=1 \
-		--window-size=1200,630 --virtual-time-budget=4000 \
-		--screenshot=$(CURDIR)/site/og.png file://$(CURDIR)/design/og.html
+		--window-size=1200,630 --virtual-time-budget=6000 \
+		--screenshot=$(CURDIR)/site/og.png file://$(CURDIR)/design/og.build.html
+	rm -f design/og.build.html
 
 serve:
 	python3 -m http.server --directory site 8000
