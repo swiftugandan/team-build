@@ -227,8 +227,10 @@ python3 -c "import sys; sys.path.insert(0, sys.argv[1]); import board as b
 assert b.is_protected('tests/deep/conftest.py', ['conftest.py'])
 assert b.is_protected('lib/x.pth', ['*.pth'])
 assert b.is_protected('acceptance/m1.py', ['acceptance/'])
-assert not b.is_protected('app/core.py', ['conftest.py', 'acceptance/*'])" "$HERE" || die "protect globs should match bare names at any depth"
-ok "a bare protect name matches at any depth"
+assert b.is_protected('acceptance/m1.py', ['/acceptance'])
+assert not b.is_protected('app/acceptance/x.py', ['acceptance/'])
+assert not b.is_protected('app/core.py', ['conftest.py', 'acceptance/*'])" "$HERE" || die "protect patterns should anchor as in .gitignore"
+ok "protect patterns anchor as in .gitignore: bare names at any depth, paths from the root"
 
 # The lead's checkout is not a helper: a helper that forgot its cd is stopped.
 out=$($B brief 2>&1 || true)
@@ -304,6 +306,25 @@ $B config gate "$GATE" >/dev/null
 $B merge-loop --once >/dev/null
 [ "$(q "SELECT status FROM landed WHERE branch = 'lead/g'")" = merged ] || die "the landing should complete after a restart"
 ok "a stop signal stops the gate too, and the landing waits in the queue"
+
+# A gate that rewrites tracked files never wedges the queue: trunk is marked broken, nothing crashes.
+$B config gate "echo x >> app/registry.txt; $GATE" >/dev/null 2>&1 && die "a gate that rewrites tracked files must need --force"
+$B config gate "echo x >> app/registry.txt; $GATE" --force >/dev/null
+git worktree add -q "$REPO/.team-build/lead-r" -b lead/r team/t
+(cd "$REPO/.team-build/lead-r" && echo r > r.txt && git add r.txt && git commit -qm r)
+$B submit --branch lead/r >/dev/null
+$B merge-loop --once >/dev/null || die "the loop must not crash on a gate that rewrites tracked files"
+q "SELECT value FROM config WHERE key = 'trunk_broken'" | grep -q "changes tracked files" \
+  || die "trunk should be marked broken by a gate that rewrites tracked files"
+$B config gate "$GATE" >/dev/null || die "the real gate should pass and clear the broken state"
+$B merge-loop --once >/dev/null
+[ "$(q "SELECT status FROM landed WHERE branch = 'lead/r'")" = merged ] || die "the landing should complete with a sound gate"
+ok "a gate that rewrites tracked files is caught, and the queue recovers"
+
+# A commit in the user's own checkout shows in status.
+(cd "$REPO" && echo note > USER.txt && git add USER.txt && git commit -qm "user work")
+$B status | grep -q "Main checkout: on main at" || die "status should report that the main checkout moved"
+ok "status reports a commit in the user's checkout"
 
 # A stale pid, even of a live process, does not look like a running loop.
 python3 - "$REPO/.git/team-build/board.db" "$$" <<'PY'

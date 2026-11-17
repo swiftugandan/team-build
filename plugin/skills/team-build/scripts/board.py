@@ -283,30 +283,27 @@ def set_cfg(conn, key, value):
 
 
 def protect_globs(conn):
-    """Protect patterns; a leading / or ./ only anchors to the repo root, which a pattern
-    with a / does already, so it is dropped."""
-    out = []
-    for g in cfg(conn, "protect", "").split("\n"):
-        g = g.strip()
-        while g.startswith("./"):
-            g = g[2:]
-        g = g.lstrip("/")
-        if g:
-            out.append(g)
-    return out
+    return [g.strip() for g in cfg(conn, "protect", "").split("\n") if g.strip()]
 
 
 def is_protected(path, globs) -> bool:
-    """A glob with a slash matches from the repo root as fnmatch (`*` crosses
-    directories); a directory such as `checks/` protects everything under it.
-    A bare name or pattern such as `conftest.py` or `*.pth` matches a file or
-    directory of that name at any depth, as in .gitignore."""
+    """As in .gitignore: a pattern with a / anywhere (`acceptance/`, `/gate.sh`,
+    `acceptance/*`) matches from the repo root, `*` crosses directories, and a
+    directory protects everything under it. A bare name or pattern (`conftest.py`,
+    `*.pth`) matches a file or directory of that name at any depth."""
     parts = path.split("/")
-    for g in globs:
-        g0 = g.rstrip("/")
-        if fnmatch(path, g) or path == g0 or path.startswith(g0 + "/"):
-            return True
-        if "/" not in g0 and any(fnmatch(part, g0) for part in parts):
+    for raw in globs:
+        g = raw
+        while g.startswith("./"):
+            g = g[2:]
+        anchored = "/" in g
+        g = g.strip("/")
+        if not g:
+            continue
+        if anchored:
+            if fnmatch(path, g) or path == g or path.startswith(g + "/"):
+                return True
+        elif any(fnmatch(part, g) for part in parts):
             return True
     return False
 
@@ -433,11 +430,30 @@ def run_cmd(cmd, cwd, timeout, log_path) -> int:
     return rc
 
 
+def stop_on_signals():
+    """On SIGTERM, SIGHUP or SIGINT: stop every running gate or check, and let
+    run_cmd raise Interrupted so the caller cleans the trunk worktree."""
+    def on_stop(*_):
+        STOP["requested"] = True
+        with STOP_LOCK:
+            groups = list(STOP["pgids"])
+        for g in groups:
+            kill_group(g)
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(sig, on_stop)
+
+
 def kill_group(pgid):
     try:
         os.killpg(pgid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass
+
+
+def changed_files(cwd):
+    # Not git(): it strips the output, and with it the status column of the first line.
+    out = run_git(["status", "--porcelain", "--untracked-files=no"], cwd=cwd).stdout
+    return [ln[3:] for ln in out.splitlines() if ln.strip()]
 
 
 def untracked_files(cwd):
@@ -473,19 +489,21 @@ def milestone_stubs(conn, ref, mid):
 
 def stub_summary(conn, ref):
     """'N' markers in red or green milestones, with a per-milestone breakdown."""
-    open_ids = set(r["id"] for r in conn.execute("SELECT id FROM milestones WHERE status IN ('red', 'green')"))
+    status = dict((r["id"], r["status"]) for r in conn.execute("SELECT id, status FROM milestones"))
     counts, other = {}, 0
     for _, _, mid in stub_markers(conn, ref):
-        if mid in open_ids:
-            counts[mid] = counts.get(mid, 0) + 1
-        else:
+        if status.get(mid) in ("parked", "dropped"):
             other += 1
+        else:
+            # Open milestones, and IDs that match no milestone (a typo hides a live stub).
+            key = mid if mid in status else "unknown ID"
+            counts[key] = counts.get(key, 0) + 1
     total = sum(counts.values())
     text = "%d" % total
     if counts:
         text += " (%s)" % ", ".join("%s %d" % (k, counts[k]) for k in sorted(counts))
     if other:
-        text += "; %d more in parked or dropped milestones or unknown IDs" % other
+        text += "; %d more in parked or dropped milestones" % other
     return total, text
 
 
@@ -586,6 +604,7 @@ def cmd_init(a):
             ("budget_hours", a.budget_hours), ("max_helpers", a.max_helpers),
             ("gate_timeout", a.gate_timeout), ("check_timeout", a.check_timeout), ("check_jobs", a.check_jobs),
             ("started_at", now()), ("root_branch", checkout_branch(root)),
+            ("root_head", run_git(["rev-parse", "--verify", "--quiet", "HEAD"], cwd=root, check=False).stdout.strip()),
         ):
             set_cfg(conn, key, value)
         conn.execute(
@@ -631,6 +650,7 @@ def cmd_config(a):
             raise Fail("budget_hours must be a number of hours above 0.") from None
     if a.key == "gate" and not a.force:
         # A gate that fails on trunk as it stands would refuse every submission.
+        stop_on_signals()
         tdir = cfg(conn, "trunk_dir")
         log = board_dir() / "logs" / ("gate-try-%s.log" % int(time.time()))
         with trunk_lock():
@@ -642,14 +662,21 @@ def cmd_config(a):
                 prepare_trunk_dir(conn, tdir, rev(cfg(conn, "trunk")))
             try:
                 rc = run_cmd(value, tdir, int(cfg(conn, "gate_timeout")), log)
+                rewritten = changed_files(tdir)
             finally:
                 git("reset", "--quiet", "--hard", "HEAD", cwd=tdir)
                 git("clean", "-ffdq", cwd=tdir)
+        if rc == 0 and rewritten:
+            raise Fail("the new gate changes tracked files on trunk (%s), so every landing would differ from what "
+                       "was checked. Make it leave tracked files alone (for example `npm ci`, not `npm install`), "
+                       "or pass --force." % ", ".join(rewritten[:5]))
         if rc != 0:
             raise Fail("the new gate fails on trunk as it stands (exit %d), so it would refuse every submission. "
                        "Log: %s. Fix trunk first, or pass --force." % (rc, log))
     with tx(conn):
         set_cfg(conn, a.key, value)
+        if a.key == "gate":
+            set_cfg(conn, "trunk_verified", "")
         log_event(conn, "lead", "config", "%s = %s" % (a.key, value.replace("\n", ", ")))
         if a.key == "gate" and cfg(conn, "trunk_broken", "").startswith("the gate") and not a.force:
             set_cfg(conn, "trunk_broken", "")
@@ -696,6 +723,8 @@ def cmd_milestone(a):
                     (value, now(), m["id"]),
                 )
                 changes.append(field)
+        if a.check is not None:
+            set_cfg(conn, "trunk_verified", "")
         if a.check is not None and m["status"] == "green" and not a.status:
             # A new check must earn green again: `board recheck` or the next landing judges it.
             conn.execute("UPDATE milestones SET status = 'red', green_sha = NULL WHERE id = ?", (m["id"],))
@@ -715,6 +744,7 @@ def cmd_milestone(a):
 
 def cmd_preflight(a):
     conn = open_board()
+    stop_on_signals()
     me = whoami(conn)
     require_lead(me)
     tdir = cfg(conn, "trunk_dir")
@@ -757,6 +787,12 @@ def preflight_run(conn, tdir, log):
     if not rows:
         ok = False
         print("no milestones. Add them with `board milestone add`.")
+    known = set(r["id"] for r in conn.execute("SELECT id FROM milestones"))
+    unknown = [(path, line, mid) for path, line, mid in stub_markers(conn, cfg(conn, "trunk")) if mid not in known]
+    if unknown:
+        ok = False
+        print("STUB markers with unknown IDs (a typo hides a live stub): %s"
+              % ", ".join("%s:%s %s" % u for u in unknown[:10]))
     for m, rc, check_log in run_checks(conn, rows, tdir, log):
         if m["status"] == "green":
             if rc != 0:
@@ -1334,10 +1370,13 @@ def cmd_status(a):
     print("Throughput: %d landed in the last hour, %.1f/h over the run." % (last_hour, (q.get("merged", 0) / hours) if hours > 0 else 0))
     root = cfg(conn, "root")
     branch_now = checkout_branch(root)
+    head_now = run_git(["rev-parse", "--verify", "--quiet", "HEAD"], cwd=root, check=False).stdout.strip()
     changed = len(dirty(root).splitlines())
-    if branch_now != cfg(conn, "root_branch") or changed:
-        print("Main checkout: on %s (was %s at init), %d changed tracked files. "
-              "A helper may have worked outside its worktree." % (branch_now, cfg(conn, "root_branch"), changed))
+    if branch_now != cfg(conn, "root_branch") or head_now != cfg(conn, "root_head", "") or changed:
+        print("Main checkout: on %s at %s (was %s at %s when the run started), %d changed tracked files. "
+              "If you did not do this, a helper worked outside its worktree."
+              % (branch_now, head_now[:10] or "no commit", cfg(conn, "root_branch"),
+                 (cfg(conn, "root_head", "") or "no commit")[:10], changed))
 
     print("\n%-8s %-7s %4s %5s %5s %5s %5s %5s  %-22s %s" % (
         "MILE", "STATUS", "PRI", "OPEN", "CLMD", "QUEUE", "REFUS", "LAND", "CREW", "VERDICT"))
@@ -1471,7 +1510,7 @@ def reset_trunk_dir(tdir, tip):
     """Put the trunk worktree exactly at tip: no merge in progress, no changes,
     no files left behind by an earlier gate. Ignored files (dependency caches) stay."""
     run_git(["merge", "--abort"], cwd=tdir, check=False)
-    git("checkout", "--quiet", "--detach", tip, cwd=tdir)
+    git("checkout", "--quiet", "--force", "--detach", tip, cwd=tdir)
     git("reset", "--quiet", "--hard", tip, cwd=tdir)
     git("clean", "-ffdq", cwd=tdir)
 
@@ -1499,7 +1538,10 @@ def merge_one(conn) -> bool:
     with tx(conn):
         # The lead's submissions go first: they carry fixes to trunk, checks and the gate.
         # While trunk is broken, nothing else can pass the gate, so only they are tried.
-        only_lead = " AND agent = 'lead'" if cfg(conn, "trunk_broken") else ""
+        # While trunk is broken, only lead submissions made after the breakage are tried:
+        # the ones queued before it would fail the same way.
+        only_lead = " AND agent = 'lead' AND id > %d" % int(cfg(conn, "trunk_broken_after", 0) or 0) \
+            if cfg(conn, "trunk_broken") else ""
         sub = conn.execute(
             "SELECT * FROM landed WHERE status = 'queued'" + only_lead + " ORDER BY agent = 'lead' DESC, id LIMIT 1"
         ).fetchone()
@@ -1522,7 +1564,6 @@ def merge_one(conn) -> bool:
         finished = True
         return False
     except Fail:
-        finished = True
         raise
     finally:
         if finished:
@@ -1534,6 +1575,8 @@ def record_landing(conn, sub, new, log_path, note=None):
     with tx(conn):
         set_cfg(conn, "trunk_tip", new)
         set_cfg(conn, "landing", "")
+        if note is None:
+            set_cfg(conn, "trunk_verified", new)
         if cfg(conn, "trunk_broken") and note is None:
             set_cfg(conn, "trunk_broken", "")
             log_event(conn, "queue", "loop", "trunk passes the gate and the green checks again")
@@ -1561,11 +1604,13 @@ def judge(conn, rows, tdir, sha, log_path, actor):
         state = "green" if rc == 0 and not stubs else "red"
         with tx(conn):
             if state != m["status"] and m["status"] in ("red", "green"):
-                conn.execute(
-                    "UPDATE milestones SET status = ?, green_sha = ?, updated_at = ? WHERE id = ?",
-                    (state, sha if state == "green" else None, now(), m["id"]),
+                cur = conn.execute(
+                    "UPDATE milestones SET status = ?, green_sha = ?, updated_at = ? "
+                    "WHERE id = ? AND status = ? AND check_cmd = ?",
+                    (state, sha if state == "green" else None, now(), m["id"], m["status"], m["check_cmd"]),
                 )
-                log_event(conn, actor, state, "%s %s at %s" % (m["id"], m["title"], sha[:10]))
+                if cur.rowcount:
+                    log_event(conn, actor, state, "%s %s at %s" % (m["id"], m["title"], sha[:10]))
             if stubs:
                 log_event(conn, actor, "suspect", "%s check passes, but %d STUB marker(s) remain: %s. "
                           "The check may be too weak." % (m["id"], len(stubs), "; ".join(x[:80] for x in stubs[:3])))
@@ -1607,22 +1652,30 @@ def run_checks(conn, rows, tdir, log_path):
     return list(zip(rows, codes, logs))
 
 
-def trunk_broken(conn, sub, tdir, tip, what, cmd, timeout, log_path):
-    """After a failure on the merged commit, run the same command on the bare tip.
-    If trunk fails it too, the submission is not at fault: put it back in the
-    queue, mark trunk broken, and tell the lead. Returns True in that case."""
+def trunk_broken(conn, sub, tdir, tip, what, check, log_path):
+    """After a failure on the merged commit, repeat the landing's steps on the bare
+    tip: the gate, then (for a check) the check, so no build output from the merge
+    is judged. If trunk fails too, the submission is not at fault: put it back in
+    the queue, mark trunk broken, and tell the lead. Returns True in that case.
+    Skipped when trunk already passed the current gate and checks at this tip."""
     if sub["agent"] == "lead" and cfg(conn, "trunk_broken"):
         return False  # the lead's fix did not fix it: refuse it as usual
+    if cfg(conn, "trunk_verified") == tip:
+        return False
+    trunk_log = Path(str(log_path)[:-4] + ".trunk.log")
     reset_trunk_dir(tdir, tip)
-    with open(log_path, "ab") as log:
-        log.write(("\n[team-build] the same command on trunk %s alone:\n" % tip[:10]).encode())
-    rc = run_cmd(cmd, tdir, timeout, log_path)
+    rc = run_cmd(cfg(conn, "gate"), tdir, int(cfg(conn, "gate_timeout")), trunk_log)
+    if rc == 0 and dirty(tdir):
+        rc, what = 1, "the gate (it changes tracked files: %s)" % ", ".join(changed_files(tdir)[:5])
+    elif rc == 0 and check is not None:
+        rc = run_cmd(check, tdir, int(cfg(conn, "check_timeout")), trunk_log)
     reset_trunk_dir(tdir, tip)
     if rc == 0:
         return False
-    reason = "%s fails on trunk %s by itself (exit %d). Log: %s" % (what, tip[:10], rc, log_path)
+    reason = "%s fails on trunk %s by itself (exit %d). Log: %s" % (what, tip[:10], rc, trunk_log)
     with tx(conn):
         set_cfg(conn, "trunk_broken", reason)
+        set_cfg(conn, "trunk_broken_after", conn.execute("SELECT MAX(id) FROM landed").fetchone()[0])
         conn.execute("UPDATE landed SET status = 'queued' WHERE id = ?", (sub["id"],))
         log_event(conn, "queue", "trunk-broken", reason + ". Only lead submissions land until one passes.")
     return True
@@ -1681,25 +1734,36 @@ def attempt_landing(conn, sub) -> bool:
                    % (", ".join(conflicted), trunk), None)
             return True
         new = rev("HEAD", cwd=tdir)
-        gate, gate_timeout = cfg(conn, "gate"), int(cfg(conn, "gate_timeout"))
-        rc = run_cmd(gate, tdir, gate_timeout, log_path)
+        rc = run_cmd(cfg(conn, "gate"), tdir, int(cfg(conn, "gate_timeout")), log_path)
         if rc != 0:
-            if trunk_broken(conn, sub, tdir, tip, "the gate", gate, gate_timeout, log_path):
+            reason = "gate failed (exit %d) after merging onto %s. Log: %s\nLast lines:\n%s" % (
+                rc, tip[:10], log_path, tail(log_path))
+            if trunk_broken(conn, sub, tdir, tip, "the gate", None, log_path):
                 return True
             reset_trunk_dir(tdir, tip)
-            refuse(conn, sub, "gate failed (exit %d) after merging onto %s. Log: %s\nLast lines:\n%s"
-                   % (rc, tip[:10], log_path, tail(log_path)), log_path)
+            refuse(conn, sub, reason, log_path)
+            return True
+        # The checks must judge the commit that lands: a gate that rewrites tracked files
+        # (an install that updates a lock file) means the submission lacks those changes.
+        rewritten = changed_files(tdir)
+        if rewritten:
+            if trunk_broken(conn, sub, tdir, tip, "the gate", None, log_path):
+                return True
+            reset_trunk_dir(tdir, tip)
+            refuse(conn, sub, "the gate changed tracked files after merging: %s. Run the gate's setup in your "
+                   "worktree (for example the install step), commit the changed files, then submit again."
+                   % ", ".join(rewritten[:10]), log_path)
             return True
         greens = conn.execute("SELECT * FROM milestones WHERE status = 'green' ORDER BY id").fetchall()
         failed = [(m, rc, lg) for m, rc, lg in run_checks(conn, greens, tdir, log_path) if rc != 0]
         if failed:
             m, rc, lg = failed[0]
-            if trunk_broken(conn, sub, tdir, tip, "the check of green milestone %s" % m["id"], m["check_cmd"],
-                            int(cfg(conn, "check_timeout")), lg):
+            reason = "milestone %s was green and its check fails after this change (exit %d). Log: %s\nLast lines:\n%s" % (
+                m["id"], rc, lg, tail(lg))
+            if trunk_broken(conn, sub, tdir, tip, "the check of green milestone %s" % m["id"], m["check_cmd"], lg):
                 return True
             reset_trunk_dir(tdir, tip)
-            refuse(conn, sub, "milestone %s was green and its check fails after this change (exit %d). Log: %s\nLast lines:\n%s"
-                   % (m["id"], rc, lg, tail(lg)), lg)
+            refuse(conn, sub, reason, lg)
             return True
         # Record the landing before trunk moves: a crash between the two is finished on restart.
         with tx(conn):
@@ -1748,14 +1812,7 @@ def cmd_merge_loop(a):
     trunk = cfg(conn, "trunk")
     tdir = cfg(conn, "trunk_dir")
 
-    def on_stop(*_):
-        STOP["requested"] = True
-        with STOP_LOCK:
-            groups = list(STOP["pgids"])
-        for g in groups:
-            kill_group(g)
-    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
-        signal.signal(sig, on_stop)
+    stop_on_signals()
     # Commands a loop killed outright left running: stop them before touching the trunk worktree.
     pgfile = board_dir() / "running.pgids"
     if pgfile.exists():
@@ -1788,7 +1845,10 @@ def cmd_merge_loop(a):
                     print("Put %s back at %s. The stray commits are on branch %s. Read them before you submit "
                           "that branch: the queue treats it as a helper's work." % (trunk, last[:10], stray), flush=True)
                     tip = last
-                elif not a.accept_trunk:
+                elif a.accept_trunk:
+                    with tx(conn):
+                        set_cfg(conn, "trunk_verified", "")
+                else:
                     raise Fail("%s is at %s, but the queue last landed %s: commits reached trunk outside the queue. "
                                "Restart with --reset-trunk to put trunk back and save those commits on a branch, "
                                "or with --accept-trunk to keep them without the gate." % (trunk, tip[:10], last[:10]))
@@ -1830,6 +1890,7 @@ def cmd_merge_loop(a):
 
 def cmd_recheck(a):
     conn = open_board()
+    stop_on_signals()
     require_lead(whoami(conn))
     trunk = cfg(conn, "trunk")
     tdir = cfg(conn, "trunk_dir")
@@ -1848,6 +1909,10 @@ def cmd_recheck(a):
         else:
             prepare_trunk_dir(conn, tdir, tip)
         try:
+            rc = run_cmd(cfg(conn, "gate"), tdir, int(cfg(conn, "gate_timeout")), log)
+            if rc != 0:
+                raise Fail("the gate fails on trunk %s (exit %d), so the checks were not run. Log: %s"
+                           % (tip[:10], rc, log))
             results = judge(conn, rows, tdir, tip, log, "lead")
         finally:
             git("reset", "--quiet", "--hard", "HEAD", cwd=tdir)

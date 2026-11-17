@@ -23,7 +23,7 @@ Start with `board join <name>`. It prints your orders: the announcements, your m
    - **Too big? Split it. Never drop it.** Add each piece with `board add --parent <id> --title "..." --spec "..."`. Write each piece's interface as a stub that fails loudly with the marker `STUB(T<piece id>)`, code your part against it, and submit your part soon. The pieces open to other helpers when your part lands, because it carries their stubs. If you cannot even split it, run `board release <id> --reason "..."` and say what you learned.
    - **Stay on the board.** On a long task, run `board brief` at least every 30 minutes. A helper that is silent for 90 minutes is released. If a board command says you left the board, do what it says: commit, `board join <your name>`, `board mine`, and leave a handoff note if another helper now holds your task.
    - A decision you are not sure about: make the best call, write it in a `board note --kind progress`, and continue. The lead corrects it later if needed.
-6. **Submit.** Commit your work. Run `git rebase <trunk>` and run your checks again. Then run `board submit`.
+6. **Submit.** Commit your work. Run `git -C <your worktree> rebase <trunk>` and run your checks again. Then run `board submit`.
 7. **Report and continue.** Post one line: `board note --task <id> --kind progress "..."`. Go back to step 1. Do not wait for the merge queue. If it refuses your work, `board claim` gives the task back to you with the reason:
    - Conflict: rebase onto trunk, resolve, run your checks again, submit again.
    - Gate or green milestone failed: read the log tail in the reason, fix the cause, submit again.

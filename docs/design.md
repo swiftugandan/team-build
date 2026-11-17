@@ -70,7 +70,7 @@ The cost is that a helper's shell does not stay in its worktree between commands
 
 ## How it was tested
 
-`scripts/selftest.sh` (29 checks) covers the board's rules with real processes in a temp repo:
+`scripts/selftest.sh` (31 checks) covers the board's rules with real processes in a temp repo:
 
 - one name per worktree, rejoin, `claim --wait`, and six parallel claims with no double claim;
 - the queue's refusals: conflict, protected path (including a rename out of one), gate failure and green regression;
@@ -87,7 +87,7 @@ A live trial on 2026-11-17 ran the skill as written on a small Python CLI with f
 - `B="python3 .../board.py"; $B` does not split words in zsh. The fix is to type the full board command each time; `board hire` puts the exact command in each helper's prompt.
 - `board archive` left the lead's own worktree behind. Archive now cleans every merged worktree under `.team-build/`.
 
-Two independent reviews then read the package: a correctness review of `board.py`, and a walk-through that followed SKILL.md and HELPER.md literally against the script in throwaway repos. Together they found 21 problems. The main ones were a check that an unprotected test config could skip, handoffs that lost committed work, split pieces claimable before their stubs landed, review fixes that no helper could claim, and recovery paths that either refused checked work or accepted unchecked work. Each one is fixed, and the self-test covers it. A second round of the same two reviews found 16 more, mostly in the new recovery code and at the trust boundary between lead and helpers: a repo commit hook that blocked every landing, a broken trunk that blamed every submitter, a helper that could act as the lead from the main checkout, checks fooled through `sitecustomize.py` or a nested `conftest.py`, and orphaned gates after SIGHUP. Those are fixed and covered too.
+Two independent reviews then read the package: a correctness review of `board.py`, and a walk-through that followed SKILL.md and HELPER.md literally against the script in throwaway repos. Together they found 21 problems. The main ones were a check that an unprotected test config could skip, handoffs that lost committed work, split pieces claimable before their stubs landed, review fixes that no helper could claim, and recovery paths that either refused checked work or accepted unchecked work. Each one is fixed, and the self-test covers it. A second round of the same two reviews found 16 more, mostly in the new recovery code and at the trust boundary between lead and helpers: a repo commit hook that blocked every landing, a broken trunk that blamed every submitter, a helper that could act as the lead from the main checkout, checks fooled through `sitecustomize.py` or a nested `conftest.py`, and orphaned gates after SIGHUP. Those are fixed and covered too. A third round found 18 more at the edges of that recovery code: stale build output judged on a bare trunk, a gate that rewrote a tracked file and wedged the queue, refusal logs that showed the wrong run, races between the queue and the lead's own edits, and protect patterns anchored wrongly. Those are fixed as well; the review loop stopped there at the user's request.
 
 Real helpers have not yet exercised a queue refusal: they rebased before each submit, so no conflict reached the queue. Recursive splitting across several helpers has not been exercised either: the trial tasks were too small. The self-test covers the board side of both.
 

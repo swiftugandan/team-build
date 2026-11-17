@@ -46,8 +46,8 @@ From the main checkout:
 board init --name <slug> --gate "<cmd>" --protect "<glob>" [--protect "<glob>" ...] --budget-hours <h> [--max-helpers <n>]
 ```
 
-- `--gate` is the fast check every landing must pass: build, type check, lint, unit tests. It runs once per landing, one landing at a time, so keep it to a few minutes. It runs in a separate worktree, so include install steps if the project needs them.
-- `--protect` names the paths only the lead may change: the acceptance checks, the scripts the gate calls, the spec, and every file that changes what a check or the gate runs. For Python that includes `conftest.py`, `sitecustomize.py`, `usercustomize.py`, `*.pth` and the test runner config; for Node, the `package.json` scripts a check calls. A pattern with a `/` matches from the repo root (`*` crosses directories, and a directory protects everything under it). A bare name such as `conftest.py` matches at any depth.
+- `--gate` is the fast check every landing must pass: build, type check, lint, unit tests. It runs once per landing, one landing at a time, so keep it to a few minutes. It runs in a separate worktree, so include install steps if the project needs them, in a form that leaves tracked files alone (`npm ci`, not `npm install`): the queue refuses a landing when the gate rewrites tracked files.
+- `--protect` names the paths only the lead may change: the acceptance checks, the scripts the gate calls, the spec, and every file that changes what a check or the gate runs. For Python that includes `conftest.py`, `sitecustomize.py`, `usercustomize.py`, `*.pth` and the test runner config; for Node, the `package.json` scripts a check calls. As in `.gitignore`, a pattern with a `/` anywhere (`acceptance/`, `/gate.sh`, `acceptance/*`) matches from the repo root: `*` crosses directories, and a directory protects everything under it. A bare name such as `conftest.py` matches at any depth.
 - `--max-helpers` is the number the user gave after the spec, else 6. One machine runs out of memory and CPU before the team runs out of work. Heavy jobs (full suites, image builds) run only in the merge queue.
 
 `init` makes the trunk branch from HEAD and checks it out in `.team-build/trunk`. It does not change the user's checkout.
@@ -59,7 +59,7 @@ Work in `.team-build/trunk`. The merge queue does not run yet, so you are the on
 - the spec and the milestone list, under a protected path (for example `docs/team-build/`). Helpers read only their own worktree, so this is how they see the spec;
 - a project that builds and passes the gate;
 - every acceptance check, under a protected path. Make each check hard to fool: a script that drives the product itself, or that runs the test runner with its own pinned config (for pytest: `--noconftest -c <protected ini>`). For Python, run the check with `python3 -I` and set the import path inside it, so `PYTHONPATH` and files such as `sitecustomize.py` cannot change what it runs. An unprotected file must not be able to skip a check;
-- every interface the milestones need, as a stub that fails loudly and carries the marker `STUB(<milestone>)`, for example `raise NotImplementedError("STUB(M04)")`. Stubs let crews work in parallel: code can call a piece before the piece exists.
+- every interface the milestones need, as a stub that fails loudly and carries the marker `STUB(<milestone>)`, for example `raise NotImplementedError("STUB(M04)")`. Stubs let crews work in parallel: code can call a piece before the piece exists. Use only real milestone and task IDs in markers: preflight fails on an unknown ID, because a typo would hide a live stub.
 - a layout where each milestone has its own files, so crews do not edit the same lines. Shared registration points (routers, CLI dispatch, dependency setup) cause most conflicts: make each entry one line;
 - checks that can run side by side in many worktrees: no fixed ports, no shared temp paths, no global state;
 - a README with the setup command for a fresh worktree, and the route.
@@ -70,6 +70,8 @@ Register each milestone, then run the preflight:
 board milestone add M01 --title "..." --check "<cmd>" [--priority 10]
 board preflight
 ```
+
+`preflight`, `recheck` and `config gate` run the gate and checks in the foreground. When the gate takes more than a few minutes, run them with the Bash tool's `run_in_background: true`.
 
 Done when: `board preflight` exits 0 (the gate passes and every check fails), and the "Why" lines under each check show that it fails because the capability is missing (it reaches a STUB, or the command does not exist yet). A check that fails because the check itself is broken (bad import, wrong path) passes preflight and blocks the team later.
 
