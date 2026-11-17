@@ -19,7 +19,7 @@ The first post is about mathematics, where Lean gives an objective pass or fail.
 | Each agent has its own sandbox and its own git branch | `board hire <name>` makes the helper's worktree at `.team-build/<name>` and binds the name to it before the agent starts. The helper makes one branch per task (`<helper>/t<id>`). |
 | Coordination only through a SQL database and git, no messaging | The board: SQLite in the git common dir (`.git/team-build/board.db`), WAL mode, 5 s busy timeout. Helpers never message each other. |
 | Five tables: Announce, Assign, Notes, Subtasks, Landed | Tables `announce`, `assign`, `notes`, `tasks`, `landed`, plus `milestones`, `agents`, `events` and `config`. The schema is at the top of `scripts/board.py`. |
-| The lead writes Announce and Assign; helpers write the rest | `announce`, `assign`, `milestone`, `merge-loop`, `recheck`, `reap`, `archive` and `config` refuse non-lead callers. Identity comes from the worktree path, so a helper cannot act as another. |
+| The lead writes Announce and Assign; helpers write the rest | `announce`, `assign`, `milestone`, `merge-loop`, `recheck`, `reap`, `archive` and `config` refuse non-lead callers. Identity comes from the worktree path, so a helper cannot act as another by mistake. It is not a security boundary: every agent runs as the same user. The queue therefore reports every protected change it lands (`protected` events), and the lead's checkout refuses helper commands such as `claim`, `brief` and helper notes. |
 | A separate job merges into main and refuses on conflict or fault; a grader checks main | `board merge-loop`: one landing at a time on a detached HEAD in `.team-build/trunk`. It runs the gate and every green milestone's check, then moves the trunk ref with a compare-and-swap. A crash never leaves an unchecked commit on trunk. |
 | Crews per statement, each with a captain who posts a plan and splits work | `board assign <helper> <milestone> --captain`. HELPER.md gives the captain duties: verdict, plan, tasks. |
 | A fixed work loop: find the plan, claim, write, check, submit, mark done, post an update | HELPER.md "The loop". `board claim` is one atomic transaction (`BEGIN IMMEDIATE`). |
@@ -70,13 +70,14 @@ The cost is that a helper's shell does not stay in its worktree between commands
 
 ## How it was tested
 
-`scripts/selftest.sh` (21 checks) covers the board's rules with real processes in a temp repo:
+`scripts/selftest.sh` (29 checks) covers the board's rules with real processes in a temp repo:
 
 - one name per worktree, rejoin, `claim --wait`, and six parallel claims with no double claim;
 - the queue's refusals: conflict, protected path (including a rename out of one), gate failure and green regression;
 - a milestone that turns green only when no `STUB(...)` marker of it remains on trunk;
 - open work on green milestones, release with the work kept on its branch, and split pieces that wait for their parent;
 - recovery: trunk moved outside the queue (`--reset-trunk`), a landing cut short after trunk moved, and edits in the trunk worktree that the queue must not discard;
+- commit hooks that must not block the queue, a broken trunk that blames no submitter, protected landings that are reported, a stop signal that stops the running gate, liveness by lock, and `init` in a repo with no commits;
 - archive clean-up.
 
 A live trial on 2026-11-17 ran the skill as written on a small Python CLI with four milestones. Six Sonnet helpers ran in two waves, and the lead landed one protected change. All four milestones went green, with 7 landings and 0 refusals, and the main checkout stayed untouched. The trial found four problems, all fixed:
@@ -86,7 +87,7 @@ A live trial on 2026-11-17 ran the skill as written on a small Python CLI with f
 - `B="python3 .../board.py"; $B` does not split words in zsh. The fix is to type the full board command each time; `board hire` puts the exact command in each helper's prompt.
 - `board archive` left the lead's own worktree behind. Archive now cleans every merged worktree under `.team-build/`.
 
-Two independent reviews then read the package: a correctness review of `board.py`, and a walk-through that followed SKILL.md and HELPER.md literally against the script in throwaway repos. Together they found 21 problems. The main ones were a check that an unprotected test config could skip, handoffs that lost committed work, split pieces claimable before their stubs landed, review fixes that no helper could claim, and recovery paths that either refused checked work or accepted unchecked work. Each one is fixed, and the self-test covers it.
+Two independent reviews then read the package: a correctness review of `board.py`, and a walk-through that followed SKILL.md and HELPER.md literally against the script in throwaway repos. Together they found 21 problems. The main ones were a check that an unprotected test config could skip, handoffs that lost committed work, split pieces claimable before their stubs landed, review fixes that no helper could claim, and recovery paths that either refused checked work or accepted unchecked work. Each one is fixed, and the self-test covers it. A second round of the same two reviews found 16 more, mostly in the new recovery code and at the trust boundary between lead and helpers: a repo commit hook that blocked every landing, a broken trunk that blamed every submitter, a helper that could act as the lead from the main checkout, checks fooled through `sitecustomize.py` or a nested `conftest.py`, and orphaned gates after SIGHUP. Those are fixed and covered too.
 
 Real helpers have not yet exercised a queue refusal: they rebased before each submit, so no conflict reached the queue. Recursive splitting across several helpers has not been exercised either: the trial tasks were too small. The self-test covers the board side of both.
 
@@ -96,4 +97,4 @@ Real helpers have not yet exercised a queue refusal: they rebased before each su
 - One run per repo at a time. `board archive` ends a run.
 - The trunk and helper worktrees sit inside the user's checkout (`.team-build/`). Tools that search up the directory tree can reach the main checkout from there: Node resolves `node_modules` upward, and ESLint and tsconfig lookups cascade upward. A worktree with no install of its own can then pass the gate on the main checkout's dependencies. Put the install step in the gate and in the setup command.
 - A check can still be fooled by code that special-cases the check's own inputs. The defences are end-to-end checks, the stub rule (`suspect` events), and the independent review at the finish.
-- The merge queue lands one submission at a time. A slow gate limits throughput: keep the gate fast and put slow checks in milestone checks.
+- The merge queue lands one submission at a time, and each landing runs the gate plus the check of every green milestone (`check_jobs` at once, default 4). Slow checks therefore slow every landing late in a run: keep both the gate and the checks fast. Checks also run side by side in the same directory, so they must not share fixed ports or temp paths.

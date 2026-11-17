@@ -15,13 +15,13 @@ Start with `board join <name>`. It prints your orders: the announcements, your m
 3. **Claim.** Run `board claim --wait 8` (give the Bash call a 600000 ms timeout). Your working tree must be clean. You get your own refused task first, then open work on your milestone, then open work on any red milestone. If no work is open yet, it waits up to 8 minutes while a captain splits a milestone or a refusal comes back. If it still says there is no open work, go to step 8.
 4. **Branch.** Run the git commands that `claim` prints. They start your task branch from trunk, or continue the branch of earlier work on the task.
 5. **Do the task.**
-   - Read the task spec, the milestone plan (`board brief`), and the code around the change.
+   - Read the task spec and the milestone plan that `claim` prints, and the code around the change.
    - Write the test first where a seam exists. Then write the code. Run the task's test, the milestone check, and the fast parts of the gate. Do not run the full suite or heavy builds. The merge queue does that.
    - Never weaken a test or a check to make it pass: no skips, no sleeps, no retries until green, no looser asserts.
    - Do not change protected paths. If a check or the gate is wrong, post `board note --kind question` with the evidence and continue with other work.
    - Change only the files the task needs. In shared files (registries, routers, config), make the smallest change.
    - **Too big? Split it. Never drop it.** Add each piece with `board add --parent <id> --title "..." --spec "..."`. Write each piece's interface as a stub that fails loudly with the marker `STUB(T<piece id>)`, code your part against it, and submit your part soon. The pieces open to other helpers when your part lands, because it carries their stubs. If you cannot even split it, run `board release <id> --reason "..."` and say what you learned.
-   - **Stay on the board.** On a long task, run `board brief` at least every 30 minutes. A helper that is silent for 90 minutes is released. If a board command says you left the board, run `board join <your name>`, then `board claim`.
+   - **Stay on the board.** On a long task, run `board brief` at least every 30 minutes. A helper that is silent for 90 minutes is released. If a board command says you left the board, do what it says: commit, `board join <your name>`, `board mine`, and leave a handoff note if another helper now holds your task.
    - A decision you are not sure about: make the best call, write it in a `board note --kind progress`, and continue. The lead corrects it later if needed.
 6. **Submit.** Commit your work. Run `git rebase <trunk>` and run your checks again. Then run `board submit`.
 7. **Report and continue.** Post one line: `board note --task <id> --kind progress "..."`. Go back to step 1. Do not wait for the merge queue. If it refuses your work, `board claim` gives the task back to you with the reason:

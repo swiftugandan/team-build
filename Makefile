@@ -15,7 +15,7 @@ test:
 	bash $(SKILL)/scripts/selftest.sh
 
 lint:
-	$(RUFF) check --select E,F,W,B --line-length 140 $(SKILL)/scripts/board.py
+	$(RUFF) check --select E,F,W,B --line-length 140 --target-version py39 $(SKILL)/scripts/board.py
 	shellcheck $(SKILL)/scripts/selftest.sh
 	@for f in .claude-plugin/marketplace.json plugin/plugin.json; do \
 		python3 -m json.tool $$f >/dev/null || exit 1; echo "ok $$f"; done

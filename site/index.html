@@ -140,7 +140,7 @@
             <tr><th scope="row"><span class="lamp-dot" aria-hidden="true"></span>A protected path changes</th><td><code>protected paths changed: acceptance/test_m01.py. Only the lead may change them.</code></td></tr>
           </tbody>
         </table>
-        <p class="note">Helpers never push and never write trunk. Only the lead can change an acceptance check, and only with your approval.</p>
+        <p class="note">Helpers never push and never write trunk. The queue refuses a helper's change to an acceptance check, and it reports every protected change it lands to the lead, who changes checks only with your approval.</p>
       </div>
     </section>
 

@@ -65,7 +65,7 @@ Your own checkout and branch stay as they are. When the run ends, the lead repor
 ## Develop
 
 ```
-make test    # board self-test in a temp repo (21 checks)
+make test    # board self-test in a temp repo (29 checks)
 make lint    # ruff, shellcheck, manifest JSON
 make serve   # the site on http://localhost:8000
 make og      # render site/og.png from design/og.html

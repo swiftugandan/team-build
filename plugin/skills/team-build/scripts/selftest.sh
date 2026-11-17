@@ -42,13 +42,13 @@ class Smoke(unittest.TestCase):
     def test_import(self):
         import app.core  # noqa: F401
 EOF
-printf 'from app.core import greet\nassert greet("x") == "hello x"\n' > acceptance/m1.py
-printf 'from app.core import shout\nassert shout("x") == "X!"\n' > acceptance/m2.py
+printf 'import os, sys\nsys.path.insert(0, os.getcwd())\nfrom app.core import greet\nassert greet("x") == "hello x"\n' > acceptance/m1.py
+printf 'import os, sys\nsys.path.insert(0, os.getcwd())\nfrom app.core import shout\nassert shout("x") == "X!"\n' > acceptance/m2.py
 git add -A && git commit -qm skeleton
 
 $B init --name t --gate "python3 -m unittest discover -s tests -q" --protect "acceptance/*" >/dev/null
-$B milestone add M1 --title Greet --check "PYTHONPATH=. python3 acceptance/m1.py" --priority 10 >/dev/null
-$B milestone add M2 --title Shout --check "PYTHONPATH=. python3 acceptance/m2.py" --priority 20 >/dev/null
+$B milestone add M1 --title Greet --check "python3 -I acceptance/m1.py" --priority 10 >/dev/null
+$B milestone add M2 --title Shout --check "python3 -I acceptance/m2.py" --priority 20 >/dev/null
 $B preflight >/dev/null || die "preflight should pass on the skeleton"
 ok "init and preflight pass on a skeleton with failing checks"
 
@@ -222,6 +222,99 @@ grep -q "T$W" <<<"$out" || die "drop should name the tasks it freed: $out"
 [ -z "$(q "SELECT after FROM tasks WHERE id = $W")" ] || die "drop should free the tasks that waited for it"
 ok "dropping a task frees the tasks that wait for it"
 
+# A bare protect name matches at any depth, as in .gitignore.
+python3 -c "import sys; sys.path.insert(0, sys.argv[1]); import board as b
+assert b.is_protected('tests/deep/conftest.py', ['conftest.py'])
+assert b.is_protected('lib/x.pth', ['*.pth'])
+assert b.is_protected('acceptance/m1.py', ['acceptance/'])
+assert not b.is_protected('app/core.py', ['conftest.py', 'acceptance/*'])" "$HERE" || die "protect globs should match bare names at any depth"
+ok "a bare protect name matches at any depth"
+
+# The lead's checkout is not a helper: a helper that forgot its cd is stopped.
+out=$($B brief 2>&1 || true)
+grep -q "lead does not read a helper brief" <<<"$out" || die "brief from the main checkout must be refused: $out"
+# A new claim needs a clean tree.
+out=$(cd "$(wtp h6)" && echo "# wip" >> app/core.py && $B claim 2>&1 || true)
+grep -q "uncommitted changes" <<<"$out" || die "claim with a dirty tree must be refused: $out"
+git -C "$(wtp h6)" checkout -q -- app/core.py
+ok "the lead's checkout and dirty trees are turned away"
+
+# The repo's commit hooks judge helpers' commits, not the queue's merge message.
+# shellcheck disable=SC2016  # $1 belongs to the hook, not to this script
+printf '#!/bin/sh\ngrep -q "^Land " "$1" && { echo "commit message must follow Conventional Commits" >&2; exit 1; }\nexit 0\n' \
+  > "$REPO/.git/hooks/commit-msg"
+chmod +x "$REPO/.git/hooks/commit-msg"
+git worktree add -q "$REPO/.team-build/lead-h" -b lead/h team/t
+(cd "$REPO/.team-build/lead-h" && echo h > hook.txt && git add hook.txt && git commit -qm "chore: hook test")
+$B submit --branch lead/h >/dev/null
+$B merge-loop --once >/dev/null
+[ "$(q "SELECT status FROM landed WHERE branch = 'lead/h'")" = merged ] || die "a commit-msg hook must not block the queue"
+rm "$REPO/.git/hooks/commit-msg"
+ok "the repo's commit hooks do not block the queue's merges"
+
+# When trunk itself fails the gate, no submitter is blamed, and a gate that passes lets the queue resume.
+GATE="python3 -m unittest discover -s tests -q"
+$B config gate false >/dev/null 2>&1 && die "a gate that fails on trunk must need --force"
+$B config gate false --force >/dev/null
+out=$(cd "$(wtp h3)" && $B claim)
+tid=$(sed -nE 's/^Claimed T([0-9]+).*/\1/p' <<<"$out")
+[ -n "$tid" ] || die "h3 should claim a task: $out"
+(cd "$(wtp h3)" && git switch -q -c "h3/t$tid" team/t && echo w > w.txt && git add w.txt && git commit -qm w && $B submit >/dev/null)
+$B merge-loop --once >/dev/null
+[ "$(q "SELECT status FROM landed WHERE agent = 'h3' ORDER BY id DESC LIMIT 1")" = queued ] || die "a broken trunk must not refuse a submission"
+[ -n "$(q "SELECT value FROM config WHERE key = 'trunk_broken'")" ] || die "trunk should be marked broken"
+$B config gate "$GATE" >/dev/null || die "the real gate should pass on trunk"
+$B merge-loop --once >/dev/null
+[ "$(q "SELECT status FROM landed WHERE agent = 'h3' ORDER BY id DESC LIMIT 1")" = merged ] || die "the submission should land once trunk passes"
+ok "a broken trunk blames no submitter, and a passing gate resumes the queue"
+
+# A protected change the lead lands is reported; a marker mentioned in a protected file is not a stub.
+git worktree add -q "$REPO/.team-build/lead-p" -b lead/p team/t
+(cd "$REPO/.team-build/lead-p" && printf 'A stub looks like STUB(M2).\n' > acceptance/notes.md && git add acceptance/notes.md \
+  && git commit -qm "notes")
+$B submit --branch lead/p >/dev/null
+$B merge-loop --once >/dev/null
+[ "$(q "SELECT COUNT(*) FROM events WHERE kind = 'protected'")" -ge 1 ] || die "a protected landing must raise an event"
+$B recheck M2 | grep -q "M2 *GREEN" || die "a marker in a protected file must not count as a stub"
+# A stray branch is not the lead's work: the protected rule holds for it.
+git worktree add -q "$WORK/stray" -b team-stray/x team/t
+(cd "$WORK/stray" && printf 'assert True\n' > acceptance/m1.py && git commit -qam weaken)
+$B submit --branch team-stray/x >/dev/null
+$B merge-loop --once >/dev/null
+q "SELECT reason FROM landed WHERE branch = 'team-stray/x'" | grep -q "protected paths changed" \
+  || die "a stray branch must meet the protected rule"
+git worktree remove --force "$WORK/stray"
+ok "protected landings are reported, protected text is not a stub, stray branches are not the lead's"
+
+# A stop signal (SIGHUP here) stops the loop and the gate it runs, and the landing waits in the queue.
+$B config gate 'python3 -c "import time; time.sleep(30)" team-build-selftest-gate' --force >/dev/null
+git worktree add -q "$REPO/.team-build/lead-g" -b lead/g team/t
+(cd "$REPO/.team-build/lead-g" && echo g > g.txt && git add g.txt && git commit -qm g)
+$B submit --branch lead/g >/dev/null
+$B merge-loop >/dev/null 2>&1 &
+loop=$!
+for _ in $(seq 30); do pgrep -f team-build-selftest-gate >/dev/null && break; python3 -c "import time; time.sleep(0.2)"; done
+pgrep -f team-build-selftest-gate >/dev/null || die "the slow gate should be running"
+kill -HUP "$loop"
+wait "$loop" || true
+python3 -c "import time; time.sleep(0.3)"
+pgrep -f team-build-selftest-gate >/dev/null && die "the gate must stop with the loop"
+[ "$(q "SELECT status FROM landed WHERE branch = 'lead/g'")" = queued ] || die "a stopped landing must go back to the queue"
+$B config gate "$GATE" >/dev/null
+$B merge-loop --once >/dev/null
+[ "$(q "SELECT status FROM landed WHERE branch = 'lead/g'")" = merged ] || die "the landing should complete after a restart"
+ok "a stop signal stops the gate too, and the landing waits in the queue"
+
+# A stale pid, even of a live process, does not look like a running loop.
+python3 - "$REPO/.git/team-build/board.db" "$$" <<'PY'
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute("INSERT OR REPLACE INTO config (key, value) VALUES ('merge_pid', ?)", (sys.argv[2],))
+c.commit()
+PY
+$B merge-loop --once >/dev/null || die "a stale pid must not block the loop"
+ok "the loop's liveness comes from a lock, not a pid"
+
 # A landing cut short after trunk moved, but before the board recorded it, is finished on restart.
 git worktree add -q "$REPO/.team-build/lead-c" -b lead/c team/t
 (cd "$REPO/.team-build/lead-c" && echo c > crash.txt && git add crash.txt && git commit -qm crash)
@@ -274,5 +367,14 @@ git rev-parse --verify -q h1/t1 >/dev/null && die "archive should delete merged 
 [ ! -e "$REPO/.team-build/trunk" ] || die "archive should remove the trunk worktree"
 git rev-parse --verify -q team/t >/dev/null || die "trunk branch must survive archive"
 ok "leave reopens work, a helper can rejoin, and archive keeps only the trunk branch"
+
+# init works in a repo with no commits, and leaves the user's branch unborn.
+E="$WORK/empty"
+mkdir -p "$E"
+(cd "$E" && git init -q -b main && git config user.name t && git config user.email t@example.invalid \
+  && $B init --name e --gate true >/dev/null) || die "init should work in a repo with no commits"
+git -C "$E" rev-parse -q --verify HEAD >/dev/null && die "init must leave the user's branch unborn"
+git -C "$E" rev-parse -q --verify team/e >/dev/null || die "the trunk branch should exist"
+ok "init works in a repo with no commits"
 
 echo "all $pass checks passed"
