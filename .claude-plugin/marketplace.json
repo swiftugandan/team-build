@@ -1,0 +1,21 @@
+{
+  "name": "team-build",
+  "owner": {
+    "name": "swiftugandan",
+    "url": "https://github.com/swiftugandan"
+  },
+  "description": "team-build: a lead agent and a crew of helpers build a large project together, coordinated through a SQL board and git.",
+  "plugins": [
+    {
+      "name": "team-build",
+      "source": "./plugin",
+      "description": "Build a large software project with a lead agent and a crew of helper agents that coordinate through a shared SQL board and git. A merge queue lands only work that passes the checks.",
+      "version": "0.1.0",
+      "homepage": "https://swiftugandan.github.io/team-build/",
+      "repository": "https://github.com/swiftugandan/team-build",
+      "license": "MIT",
+      "keywords": ["multi-agent", "orchestration", "merge-queue", "worktrees", "acceptance-tests"],
+      "strict": false
+    }
+  ]
+}
