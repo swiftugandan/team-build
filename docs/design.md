@@ -70,7 +70,14 @@ The cost is that a helper's shell does not stay in its worktree between commands
 
 ## How it was tested
 
-`scripts/selftest.sh` covers the board's rules with real processes in a temp repo: one name per worktree, `claim --wait`, six parallel claims with no double claim, the queue's refusals (conflict, protected path, gate, green regression), green and red flips, trunk moved outside the queue, and archive clean-up.
+`scripts/selftest.sh` (19 checks) covers the board's rules with real processes in a temp repo:
+
+- one name per worktree, rejoin, `claim --wait`, and six parallel claims with no double claim;
+- the queue's refusals: conflict, protected path (including a rename out of one), gate failure and green regression;
+- a milestone that turns green only when no `STUB(...)` marker of it remains on trunk;
+- open work on green milestones, release with the work kept on its branch, and split pieces that wait for their parent;
+- recovery: trunk moved outside the queue (`--reset-trunk`), a landing cut short after trunk moved, and edits in the trunk worktree that the queue must not discard;
+- archive clean-up.
 
 A live trial on 2026-11-17 ran the skill as written on a small Python CLI with four milestones. Six Sonnet helpers ran in two waves, and the lead landed one protected change. All four milestones went green, with 7 landings and 0 refusals, and the main checkout stayed untouched. The trial found four problems, all fixed:
 
@@ -79,6 +86,8 @@ A live trial on 2026-11-17 ran the skill as written on a small Python CLI with f
 - `B="python3 .../board.py"; $B` does not split words in zsh. The fix is to type the full board command each time; `board hire` puts the exact command in each helper's prompt.
 - `board archive` left the lead's own worktree behind. Archive now cleans every merged worktree under `.team-build/`.
 
+Two independent reviews then read the package: a correctness review of `board.py`, and a walk-through that followed SKILL.md and HELPER.md literally against the script in throwaway repos. Together they found 21 problems. The main ones were a check that an unprotected test config could skip, handoffs that lost committed work, split pieces claimable before their stubs landed, review fixes that no helper could claim, and recovery paths that either refused checked work or accepted unchecked work. Each one is fixed, and the self-test covers it.
+
 Real helpers have not yet exercised a queue refusal: they rebased before each submit, so no conflict reached the queue. Recursive splitting across several helpers has not been exercised either: the trial tasks were too small. The self-test covers the board side of both.
 
 ## Limits
@@ -86,4 +95,5 @@ Real helpers have not yet exercised a queue refusal: they rebased before each su
 - One machine. All agents must reach the board file in the repo's `.git` directory, so remote agents cannot join.
 - One run per repo at a time. `board archive` ends a run.
 - The trunk and helper worktrees sit inside the user's checkout (`.team-build/`). Tools that search up the directory tree can reach the main checkout from there: Node resolves `node_modules` upward, and ESLint and tsconfig lookups cascade upward. A worktree with no install of its own can then pass the gate on the main checkout's dependencies. Put the install step in the gate and in the setup command.
+- A check can still be fooled by code that special-cases the check's own inputs. The defences are end-to-end checks, the stub rule (`suspect` events), and the independent review at the finish.
 - The merge queue lands one submission at a time. A slow gate limits throughput: keep the gate fast and put slow checks in milestone checks.

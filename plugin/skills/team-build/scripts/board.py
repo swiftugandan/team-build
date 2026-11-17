@@ -33,7 +33,7 @@ MILESTONE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,19}$")
 NOTE_KINDS = ("plan", "verdict", "progress", "question", "answer", "stuck", "free", "handoff")
 # Events the lead acts on. `board watch` prints only these.
 ATTENTION = (
-    "merged", "refused", "green", "red", "question", "stuck", "free",
+    "merged", "refused", "green", "red", "suspect", "question", "stuck", "free",
     "verdict", "plan", "handoff", "left", "loop",
 )
 CONFIG_KEYS = ("gate", "protect", "budget_hours", "max_helpers", "gate_timeout", "check_timeout")
@@ -92,6 +92,8 @@ CREATE TABLE tasks (
     id          INTEGER PRIMARY KEY,
     milestone   TEXT NOT NULL REFERENCES milestones (id),
     parent      INTEGER REFERENCES tasks (id),
+    after       INTEGER REFERENCES tasks (id),  -- not claimable until this task lands
+    base        TEXT,                           -- trunk tip when the task was last claimed
     title       TEXT NOT NULL,
     spec        TEXT NOT NULL DEFAULT '',
     status      TEXT NOT NULL DEFAULT 'open'
@@ -134,6 +136,18 @@ CREATE INDEX landed_by_status ON landed (status);
 
 class Fail(Exception):
     """An error the caller can fix. Printed without a traceback."""
+
+
+class Interrupted(Exception):
+    """The merge loop was told to stop while a gate or check ran."""
+
+
+# SIGTERM sets `requested`; run_cmd then kills the running gate's process
+# group, so a stopped loop never leaves a gate running in the trunk worktree.
+STOP = {"requested": False, "pgid": None}
+
+# A task is ready to claim when the task it waits for has landed.
+READY = "(t.after IS NULL OR EXISTS (SELECT 1 FROM tasks d WHERE d.id = t.after AND d.status = 'landed'))"
 
 
 # --- small helpers ---------------------------------------------------------
@@ -234,6 +248,15 @@ def protect_globs(conn):
     return [g for g in cfg(conn, "protect", "").split("\n") if g.strip()]
 
 
+def is_protected(path, globs) -> bool:
+    """A glob matches as fnmatch (`*` crosses directories); a plain directory
+    name such as `checks` or `checks/` protects everything under it."""
+    for g in globs:
+        if fnmatch(path, g) or path == g.rstrip("/") or path.startswith(g.rstrip("/") + "/"):
+            return True
+    return False
+
+
 def log_event(conn, actor, kind, body):
     conn.execute(
         "INSERT INTO events (at, actor, kind, body) VALUES (?, ?, ?, ?)",
@@ -248,6 +271,15 @@ def whoami(conn, required=True):
     ).fetchone()
     if row is None:
         if required:
+            gone = conn.execute(
+                "SELECT name FROM agents WHERE worktree = ? AND role = 'helper' ORDER BY joined_at DESC LIMIT 1", (wt,)
+            ).fetchone()
+            if gone:
+                raise Fail("%s has left the board (it left, or the lead released it). Run `board join %s` "
+                           "to come back, then `board claim`." % (gone["name"], gone["name"]))
+            root = cfg(conn, "root")
+            if wt.startswith(os.path.join(root, ".team-build") + os.sep):
+                raise Fail("%s is not a helper worktree. Run board commands from the main checkout: %s" % (wt, root))
             raise Fail("this worktree has not joined the board. Run `board join <name>` first.")
         return None
     conn.execute("UPDATE agents SET last_seen = ? WHERE name = ?", (now(), row["name"]))
@@ -327,13 +359,56 @@ def run_cmd(cmd, cwd, timeout, log_path) -> int:
             cmd, shell=True, cwd=cwd, stdin=subprocess.DEVNULL,
             stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
         )
+        STOP["pgid"] = p.pid
         try:
-            return p.wait(timeout=timeout)
+            rc = p.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            os.killpg(p.pid, signal.SIGKILL)
+            kill_group(p.pid)
             p.wait()
             log.write(("\n[team-build] timed out after %d s\n" % timeout).encode())
-            return 124
+            rc = 124
+        finally:
+            STOP["pgid"] = None
+    if STOP["requested"]:
+        raise Interrupted()
+    return rc
+
+
+def kill_group(pgid):
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def untracked_files(cwd):
+    out = git("status", "--porcelain", "--untracked-files=all", cwd=cwd)
+    return [ln[3:] for ln in out.splitlines() if ln.startswith("?? ")]
+
+
+def milestone_stubs(conn, ref, mid):
+    """STUB markers on ref that belong to a milestone: STUB(<milestone>) and STUB(T<id>) of its tasks."""
+    ids = [mid] + ["T%d" % r["id"] for r in conn.execute("SELECT id FROM tasks WHERE milestone = ?", (mid,))]
+    r = run_git(["grep", "-n", "-E", "STUB\\((%s)\\)" % "|".join(ids), ref], check=False)
+    return [ln[len(ref) + 1:] if ln.startswith(ref + ":") else ln for ln in r.stdout.splitlines()]
+
+
+def saved_branch(conn, t):
+    """The branch with a task's unlanded commits, so whoever claims it next continues from there."""
+    if t["owner"]:
+        cand = "%s/t%d" % (t["owner"], t["id"])
+        ref = "refs/heads/" + cand
+        if run_git(["rev-parse", "--verify", "--quiet", ref], check=False).returncode == 0 \
+                and not is_ancestor(ref, cfg(conn, "trunk")):
+            return cand
+    return t["branch"]
+
+
+def reopen(conn, t):
+    conn.execute(
+        "UPDATE tasks SET status = 'open', owner = NULL, branch = ?, updated_at = ? WHERE id = ?",
+        (saved_branch(conn, t), now(), t["id"]),
+    )
 
 
 def tail(path, n=TAIL_LINES) -> str:
@@ -428,6 +503,10 @@ def cmd_init(a):
             (root, now(), now()),
         )
         log_event(conn, "lead", "init", "run %s, trunk %s from %s" % (a.name, trunk, base[:10]))
+    pending = git("status", "--porcelain", cwd=root)
+    if pending:
+        print("Note: these changes in the main checkout are not committed, so they are not on trunk:")
+        print(indent("\n".join(pending.splitlines()[:10])))
     print("Board ready for run '%s'." % a.name)
     print("Trunk branch %s starts at %s." % (trunk, base[:10]))
     print("Trunk worktree: %s" % trunk_dir)
@@ -451,6 +530,15 @@ def cmd_config(a):
     value = a.value
     if a.key == "protect":
         value = "\n".join(g.strip() for g in a.value.split(",") if g.strip())
+    elif a.key in ("max_helpers", "gate_timeout", "check_timeout"):
+        if not value.isdigit() or int(value) < 1:
+            raise Fail("%s must be a whole number above 0 (seconds for timeouts)." % a.key)
+    elif a.key == "budget_hours":
+        try:
+            if float(value) <= 0:
+                raise ValueError
+        except ValueError:
+            raise Fail("budget_hours must be a number of hours above 0.") from None
     with tx(conn):
         set_cfg(conn, a.key, value)
         log_event(conn, "lead", "config", "%s = %s" % (a.key, value.replace("\n", ", ")))
@@ -466,6 +554,8 @@ def cmd_milestone(a):
             raise Fail("milestone IDs use letters, digits, '-' and '_' (for example M01).")
         if not a.title or not a.check:
             raise Fail("`milestone add` needs --title and --check.")
+        if conn.execute("SELECT 1 FROM milestones WHERE id = ?", (a.id,)).fetchone():
+            raise Fail("milestone %s exists. Use `board milestone set %s` to change it." % (a.id, a.id))
         with tx(conn):
             conn.execute(
                 "INSERT INTO milestones (id, title, check_cmd, priority, updated_at) VALUES (?, ?, ?, ?, ?)",
@@ -522,6 +612,10 @@ def cmd_preflight(a):
     with trunk_lock():
         if dirty(tdir):
             raise Fail("the trunk worktree has uncommitted changes. Commit the skeleton first.")
+        new_files = untracked_files(tdir)
+        if new_files:
+            raise Fail("the trunk worktree has files that are not committed: %s. "
+                       "`git add` and commit them, or remove them." % ", ".join(new_files[:10]))
         log = board_dir() / "logs" / ("preflight-gate-%s.log" % int(time.time()))
         rc = run_cmd(cfg(conn, "gate"), tdir, int(cfg(conn, "gate_timeout")), log)
         print("gate: %s (exit %d) log %s" % ("PASS" if rc == 0 else "FAIL", rc, log))
@@ -535,13 +629,21 @@ def cmd_preflight(a):
             ok = False
             print("no milestones. Add them with `board milestone add`.")
         for m, rc, log in run_milestone_checks(conn, rows, tdir, "preflight"):
-            if rc == 0:
+            if m["status"] == "green":
+                if rc != 0:
+                    ok = False
+                    print("%s: green, but its check fails now (exit %d). Run `board recheck %s`." % (m["id"], rc, m["id"]))
+                else:
+                    print("%s: green, and its check passes." % m["id"])
+            elif rc == 0:
                 ok = False
                 print("%s: PASSES already. The check is too weak, or the work exists. "
                       "Fix the check, or run `board recheck %s` to mark it green." % (m["id"], m["id"]))
             else:
                 print("%s: fails as expected (exit %d). Why:" % (m["id"], rc))
                 print(indent(failure_lines(log), "    "))
+        # The gate and checks may rewrite tracked files (lock files, formatters).
+        git("reset", "--quiet", "--hard", "HEAD", cwd=tdir)
     print("STUB markers on trunk: %d" % stub_count(cfg(conn, "trunk")))
     with tx(conn):
         log_event(conn, "lead", "preflight", "ok" if ok else "failed")
@@ -633,8 +735,11 @@ def cmd_join(a):
     with tx(conn):
         row = conn.execute("SELECT * FROM agents WHERE name = ?", (a.name,)).fetchone()
         if row is not None:
-            if row["worktree"] != wt or row["state"] != "active":
+            if row["worktree"] != wt:
                 raise Fail("the name %s is taken. Ask the lead for a new name." % a.name)
+            if row["state"] == "left":
+                conn.execute("UPDATE agents SET state = 'active', last_seen = ? WHERE name = ?", (now(), a.name))
+                log_event(conn, a.name, "joined", "%s joined again from %s" % (a.name, wt))
         else:
             other = conn.execute(
                 "SELECT name FROM agents WHERE worktree = ? AND state = 'active'", (wt,)
@@ -651,6 +756,8 @@ def cmd_join(a):
 
 def brief(conn, me, show_all=False):
     name = me["name"]
+    top_a = conn.execute("SELECT COALESCE(MAX(id), 0) FROM announce").fetchone()[0]
+    top_n = conn.execute("SELECT COALESCE(MAX(id), 0) FROM notes").fetchone()[0]
     trunk = cfg(conn, "trunk")
     asg = assignment(conn, name)
     role = "lead" if me["role"] == "lead" else ("captain" if asg and asg["captain"] else "helper")
@@ -665,7 +772,7 @@ def brief(conn, me, show_all=False):
     print("The merge queue runs the gate: %s" % cfg(conn, "gate"))
 
     since = 0 if show_all else me["announce_seen"]
-    rows = conn.execute("SELECT * FROM announce WHERE id > ? ORDER BY id", (since,)).fetchall()
+    rows = conn.execute("SELECT * FROM announce WHERE id > ? AND id <= ? ORDER BY id", (since, top_a)).fetchall()
     if rows:
         print("\nAnnouncements%s:" % ("" if show_all else " (new)"))
         for r in rows:
@@ -696,9 +803,10 @@ def brief(conn, me, show_all=False):
 
     answers = conn.execute(
         "SELECT n.* FROM notes n LEFT JOIN tasks t ON t.id = n.task "
-        "WHERE n.id > ? AND n.kind = 'answer' AND (t.owner = ? OR n.milestone = ? OR (n.task IS NULL AND n.milestone IS NULL)) "
+        "WHERE n.id > ? AND n.id <= ? AND n.kind = 'answer' "
+        "AND (t.owner = ? OR n.milestone = ? OR (n.task IS NULL AND n.milestone IS NULL)) "
         "ORDER BY n.id",
-        (me["notes_seen"], name, asg["milestone"] if asg else ""),
+        (me["notes_seen"], top_n, name, asg["milestone"] if asg else ""),
     ).fetchall()
     for n in answers:
         print("\nAnswer from %s%s:" % (n["author"], " on T%d" % n["task"] if n["task"] else ""))
@@ -715,11 +823,10 @@ def brief(conn, me, show_all=False):
                 line += "\n    refused: %s" % first_line(t["last_reason"])
             print(line)
 
-    top_a = conn.execute("SELECT COALESCE(MAX(id), 0) FROM announce").fetchone()[0]
-    top_n = conn.execute("SELECT COALESCE(MAX(id), 0) FROM notes").fetchone()[0]
     with tx(conn):
         conn.execute(
-            "UPDATE agents SET announce_seen = ?, notes_seen = ? WHERE name = ?", (top_a, top_n, name)
+            "UPDATE agents SET announce_seen = MAX(announce_seen, ?), notes_seen = MAX(notes_seen, ?) WHERE name = ?",
+            (top_a, top_n, name),
         )
 
 
@@ -738,8 +845,16 @@ def print_task(conn, t, me_name, resumed=False):
     kids = conn.execute("SELECT id, status, title FROM tasks WHERE parent = ? ORDER BY id", (t["id"],)).fetchall()
     for k in kids:
         print("Child: T%d [%s] %s" % (k["id"], k["status"], k["title"]))
+    if t["after"]:
+        print("Waited for: T%d (landed)" % t["after"])
     print("Spec:")
     print(indent(t["spec"] or "(none: read the milestone plan with `board brief`)"))
+    h = conn.execute(
+        "SELECT * FROM notes WHERE task = ? AND kind = 'handoff' ORDER BY id DESC LIMIT 1", (t["id"],)
+    ).fetchone()
+    if h:
+        print("Handoff from %s:" % h["author"])
+        print(indent(h["body"]))
     if t["last_reason"]:
         print("Last refusal (%d so far):" % t["refusals"])
         print(indent(t["last_reason"]))
@@ -767,11 +882,14 @@ def cmd_claim(a):
         rc = try_claim(conn, a)
         if rc != NO_WORK:
             return rc
-        red = conn.execute("SELECT COUNT(*) FROM milestones WHERE status = 'red'").fetchone()[0]
-        if time.time() >= deadline or red == 0:
+        pending = conn.execute(
+            "SELECT (SELECT COUNT(*) FROM milestones WHERE status = 'red') + "
+            "(SELECT COUNT(*) FROM tasks WHERE status IN ('open', 'claimed', 'queued', 'refused'))"
+        ).fetchone()[0]
+        if time.time() >= deadline or pending == 0:
             print("No open work%s%s." % (
                 " on " + a.milestone if a.milestone else "",
-                "" if red else ": every milestone is green, parked or dropped"))
+                "" if pending else ": every milestone is green, parked or dropped, and no task is in progress"))
             return NO_WORK
         if not told:
             print("No open work yet. Waiting up to %d min for new tasks or refusals..." % a.wait, flush=True)
@@ -799,19 +917,22 @@ def try_claim(conn, a):
             if row is None and target:
                 row = conn.execute(
                     "SELECT t.* FROM tasks t JOIN milestones m ON m.id = t.milestone "
-                    "WHERE t.status = 'open' AND t.milestone = ? AND m.status = 'red' ORDER BY t.id LIMIT 1",
+                    "WHERE t.status = 'open' AND t.milestone = ? AND m.status IN ('red', 'green') AND " + READY +
+                    " ORDER BY t.id LIMIT 1",
                     (target,),
                 ).fetchone()
             if row is None and not a.milestone:
+                # Red milestones first; then open work on green ones (review fixes, leftover pieces).
                 row = conn.execute(
                     "SELECT t.* FROM tasks t JOIN milestones m ON m.id = t.milestone "
-                    "WHERE t.status = 'open' AND m.status = 'red' ORDER BY m.priority, t.id LIMIT 1"
+                    "WHERE t.status = 'open' AND m.status IN ('red', 'green') AND " + READY +
+                    " ORDER BY m.status = 'green', m.priority, t.id LIMIT 1"
                 ).fetchone()
             if row is None:
                 return NO_WORK
             conn.execute(
-                "UPDATE tasks SET status = 'claimed', owner = ?, updated_at = ? WHERE id = ?",
-                (name, now(), row["id"]),
+                "UPDATE tasks SET status = 'claimed', owner = ?, base = ?, updated_at = ? WHERE id = ?",
+                (name, rev(cfg(conn, "trunk")), now(), row["id"]),
             )
             log_event(conn, name, "claimed", "T%d [%s] %s" % (row["id"], row["milestone"], row["title"]))
             row = get_task(conn, row["id"])
@@ -835,14 +956,17 @@ def cmd_add(a):
         m = get_milestone(conn, milestone)
         if m["status"] == "dropped":
             raise Fail("milestone %s is dropped." % milestone)
+        after = a.after if a.after is not None else a.parent
+        if after:
+            get_task(conn, after)
         cur = conn.execute(
-            "INSERT INTO tasks (milestone, parent, title, spec, created_by, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (milestone, a.parent, a.title, a.spec or "", me["name"], now(), now()),
+            "INSERT INTO tasks (milestone, parent, after, title, spec, created_by, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (milestone, a.parent, after or None, a.title, a.spec or "", me["name"], now(), now()),
         )
         tid = cur.lastrowid
         log_event(conn, me["name"], "added", "T%d [%s] %s%s" % (tid, milestone, a.title, " under T%d" % a.parent if a.parent else ""))
-    print("T%d added to %s." % (tid, milestone))
+    print("T%d added to %s.%s" % (tid, milestone, " It opens when T%d lands." % after if after else ""))
 
 
 def cmd_release(a):
@@ -854,9 +978,7 @@ def cmd_release(a):
             require_lead(me)
         if t["status"] not in ("claimed", "refused"):
             raise Fail("T%d is %s. Only a claimed or refused task can be released." % (t["id"], t["status"]))
-        conn.execute(
-            "UPDATE tasks SET status = 'open', owner = NULL, updated_at = ? WHERE id = ?", (now(), t["id"])
-        )
+        reopen(conn, t)
         conn.execute(
             "INSERT INTO notes (at, author, milestone, task, kind, body) VALUES (?, ?, ?, ?, 'handoff', ?)",
             (now(), me["name"], t["milestone"], t["id"], a.reason),
@@ -932,12 +1054,26 @@ def cmd_submit(a):
         if untracked:
             print("Note: untracked files are not part of the submission: %s" % ", ".join(untracked[:10]))
     if is_ancestor(sha, trunk):
+        if me["role"] != "lead" and task_id is not None:
+            t = get_task(conn, task_id)
+            if t["owner"] == me["name"] and t["status"] == "claimed" and t["base"] \
+                    and sha != t["base"] and not is_ancestor(sha, t["base"]):
+                with tx(conn):
+                    conn.execute("UPDATE tasks SET status = 'landed', branch = ?, updated_at = ? WHERE id = ?",
+                                 (branch, now(), t["id"]))
+                    log_event(conn, me["name"], "merged", "T%d is on %s through another landing" % (t["id"], trunk))
+                print("T%d is already on %s through another landing, so it is marked landed. Claim the next task."
+                      % (t["id"], trunk))
+                return 0
         raise Fail("nothing to land: %s is already on %s." % (sha[:10], trunk))
     with tx(conn):
         if task_id is not None:
             t = get_task(conn, task_id)
             if me["role"] != "lead" and (t["owner"] != me["name"] or t["status"] != "claimed"):
                 raise Fail("T%d is not claimed by you (it is %s, owner %s)." % (t["id"], t["status"], t["owner"]))
+            if me["role"] == "lead" and t["status"] not in ("open", "refused"):
+                raise Fail("T%d is %s%s. The lead can take over only an open or refused task." % (
+                    t["id"], t["status"], " by " + t["owner"] if t["owner"] else ""))
             conn.execute(
                 "UPDATE tasks SET status = 'queued', owner = COALESCE(owner, ?), branch = ?, updated_at = ? WHERE id = ?",
                 (me["name"], branch, now(), t["id"]),
@@ -979,13 +1115,12 @@ def cmd_mine(a):
 
 
 def release_agent(conn, name, actor, why):
-    held = [r["id"] for r in conn.execute(
-        "SELECT id FROM tasks WHERE owner = ? AND status IN ('claimed', 'refused')", (name,)
-    )]
-    conn.execute(
-        "UPDATE tasks SET status = 'open', owner = NULL, updated_at = ? WHERE owner = ? AND status IN ('claimed', 'refused')",
-        (now(), name),
-    )
+    rows = conn.execute(
+        "SELECT * FROM tasks WHERE owner = ? AND status IN ('claimed', 'refused')", (name,)
+    ).fetchall()
+    for t in rows:
+        reopen(conn, t)
+    held = [t["id"] for t in rows]
     conn.execute("UPDATE agents SET state = 'left' WHERE name = ?", (name,))
     body = "%s left (%s)" % (name, why)
     if held:
@@ -1071,6 +1206,12 @@ def cmd_status(a):
             c.get("refused", 0), c.get("landed", 0), ",".join(crew)[:22], first_line(v["body"], 50) if v else ""))
         if m["status"] in ("parked", "dropped") and m["reason"]:
             print("         reason: %s" % first_line(m["reason"], 100))
+
+    waiting = conn.execute(
+        "SELECT t.id, t.after FROM tasks t WHERE t.status = 'open' AND NOT " + READY + " ORDER BY t.id"
+    ).fetchall()
+    if waiting:
+        print("Waiting for another task to land: %s" % ", ".join("T%d (after T%d)" % (w["id"], w["after"]) for w in waiting))
 
     helpers = conn.execute("SELECT * FROM agents WHERE role = 'helper' AND state = 'active' ORDER BY name").fetchall()
     print("\nActive helpers: %d" % len(helpers))
@@ -1176,9 +1317,31 @@ def refuse(conn, sub, reason, log_path, actor="queue"):
 
 
 def reset_trunk_dir(tdir, tip):
+    """Put the trunk worktree exactly at tip: no merge in progress, no changes,
+    no files left behind by an earlier gate. Ignored files (dependency caches) stay."""
     run_git(["merge", "--abort"], cwd=tdir, check=False)
     git("checkout", "--quiet", "--detach", tip, cwd=tdir)
     git("reset", "--quiet", "--hard", tip, cwd=tdir)
+    git("clean", "-ffdq", cwd=tdir)
+
+
+def prepare_trunk_dir(conn, tdir, tip):
+    """Detach the trunk worktree at tip. Discard only what the queue made: a
+    landing cut short by a crash leaves the `merging` marker set. Anything
+    else (edits, commits on the detached HEAD) stops with instructions."""
+    if not cfg(conn, "merging"):
+        if dirty(tdir) or untracked_files(tdir):
+            raise Fail("the trunk worktree %s has changes or new files that the queue did not make. "
+                       "Move them to a lead branch, or discard them with `git -C %s reset --hard && git -C %s clean -fd`, "
+                       "then try again." % (tdir, tdir, tdir))
+        head = rev("HEAD", cwd=tdir)
+        if not is_ancestor(head, tip):
+            raise Fail("the trunk worktree %s holds commit %s, which is not on %s. Save it with "
+                       "`git -C %s branch lead/<topic> %s` and submit that branch, then try again."
+                       % (tdir, head[:10], cfg(conn, "trunk"), tdir, head[:10]))
+    reset_trunk_dir(tdir, tip)
+    with tx(conn):
+        set_cfg(conn, "merging", "")
 
 
 def merge_one(conn) -> bool:
@@ -1187,6 +1350,88 @@ def merge_one(conn) -> bool:
         if sub is None:
             return False
         conn.execute("UPDATE landed SET status = 'merging' WHERE id = ?", (sub["id"],))
+        set_cfg(conn, "merging", "L%d" % sub["id"])
+    # Clear the marker on every outcome except a crash: refusals and the
+    # trunk-moved stop all leave the trunk worktree clean at a known commit.
+    finished = False
+    try:
+        result = attempt_landing(conn, sub)
+        finished = True
+        return result
+    except Interrupted:
+        # Stopped during a gate or check: undo the attempt, keep the submission queued.
+        with trunk_lock():
+            reset_trunk_dir(cfg(conn, "trunk_dir"), rev(cfg(conn, "trunk")))
+        with tx(conn):
+            conn.execute("UPDATE landed SET status = 'queued' WHERE id = ? AND status = 'merging'", (sub["id"],))
+        finished = True
+        return False
+    except Fail:
+        finished = True
+        raise
+    finally:
+        if finished:
+            with tx(conn):
+                set_cfg(conn, "merging", "")
+
+
+def record_landing(conn, sub, new, log_path, note=None):
+    with tx(conn):
+        set_cfg(conn, "trunk_tip", new)
+        set_cfg(conn, "landing", "")
+        conn.execute(
+            "UPDATE landed SET status = 'merged', merged_sha = ?, log = ?, reason = ?, decided_at = ? WHERE id = ?",
+            (new, str(log_path) if log_path else None, note, now(), sub["id"]),
+        )
+        if sub["task"]:
+            conn.execute(
+                "UPDATE tasks SET status = 'landed', updated_at = ? WHERE id = ? AND status = 'queued'",
+                (now(), sub["task"]),
+            )
+        log_event(conn, "queue", "merged", "L%d %sby %s -> %s%s" % (
+            sub["id"], "T%d " % sub["task"] if sub["task"] else "", sub["agent"], new[:10],
+            " (%s)" % note if note else ""))
+
+
+def judge(conn, rows, tdir, sha, log_path, actor):
+    """Run each milestone's check with sha checked out in tdir, and record red or
+    green. A check that passes while the milestone's STUB markers remain on trunk
+    stays red, and the lead gets a `suspect` event: the check may be too weak."""
+    out = []
+    for m in rows:
+        rc = run_cmd(m["check_cmd"], tdir, int(cfg(conn, "check_timeout")), log_path)
+        stubs = milestone_stubs(conn, sha, m["id"]) if rc == 0 else []
+        state = "green" if rc == 0 and not stubs else "red"
+        with tx(conn):
+            if state != m["status"] and m["status"] in ("red", "green"):
+                conn.execute(
+                    "UPDATE milestones SET status = ?, green_sha = ?, updated_at = ? WHERE id = ?",
+                    (state, sha if state == "green" else None, now(), m["id"]),
+                )
+                log_event(conn, actor, state, "%s %s at %s" % (m["id"], m["title"], sha[:10]))
+            if stubs:
+                log_event(conn, actor, "suspect", "%s check passes, but %d STUB marker(s) remain: %s. "
+                          "The check may be too weak." % (m["id"], len(stubs), "; ".join(x[:80] for x in stubs[:3])))
+        out.append((m, rc, stubs))
+    return out
+
+
+def red_to_check(conn, task_id):
+    """Red milestones worth a check after a landing: the task's own milestone and
+    milestones whose tasks have all landed. After a landing with no task (the
+    lead's), every red milestone."""
+    if task_id is None:
+        return conn.execute("SELECT * FROM milestones WHERE status = 'red' ORDER BY priority, id").fetchall()
+    return conn.execute(
+        "SELECT * FROM milestones m WHERE m.status = 'red' AND (m.id = ? OR ("
+        "EXISTS (SELECT 1 FROM tasks t WHERE t.milestone = m.id AND t.status = 'landed') AND "
+        "NOT EXISTS (SELECT 1 FROM tasks t WHERE t.milestone = m.id AND t.status IN ('open', 'claimed', 'queued', 'refused'))"
+        ")) ORDER BY priority, id",
+        (get_task(conn, task_id)["milestone"],),
+    ).fetchall()
+
+
+def attempt_landing(conn, sub) -> bool:
     trunk = cfg(conn, "trunk")
     tdir = cfg(conn, "trunk_dir")
     log_path = board_dir() / "logs" / ("L%d.log" % sub["id"])
@@ -1197,21 +1442,21 @@ def merge_one(conn) -> bool:
                 conn.execute("UPDATE landed SET status = 'queued' WHERE id = ?", (sub["id"],))
                 log_event(conn, "queue", "loop", "stopped: %s moved outside the merge queue (%s -> %s)" % (
                     trunk, (cfg(conn, "trunk_tip") or "?")[:10], tip[:10]))
-            raise Fail("%s moved outside the merge queue (expected %s, found %s). "
-                       "Find who committed to trunk, then restart the loop." % (trunk, cfg(conn, "trunk_tip"), tip))
+            raise Fail("%s moved outside the merge queue (expected %s, found %s). Restart the loop with "
+                       "--reset-trunk to undo it, or --accept-trunk to keep it." % (trunk, cfg(conn, "trunk_tip"), tip))
         reset_trunk_dir(tdir, tip)
         sha = sub["sha"]
         if run_git(["cat-file", "-e", sha + "^{commit}"], check=False).returncode != 0:
             refuse(conn, sub, "missing commit %s. Commit again and resubmit." % sha[:10], None)
             return True
         if is_ancestor(sha, tip):
-            refuse(conn, sub, "nothing to land: %s is already on %s." % (sha[:10], trunk), None)
+            # Another landing carried this commit, for example a branch built on top of it.
+            record_landing(conn, sub, tip, None, "already on %s through another landing" % trunk)
             return True
         submitter = conn.execute("SELECT role FROM agents WHERE name = ?", (sub["agent"],)).fetchone()
         if submitter is None or submitter["role"] != "lead":
-            changed = git("diff", "--name-only", "%s...%s" % (tip, sha)).splitlines()
-            globs = protect_globs(conn)
-            hit = [f for f in changed if any(fnmatch(f, g) for g in globs)]
+            changed = git("diff", "--name-only", "--no-renames", "%s...%s" % (tip, sha)).splitlines()
+            hit = [f for f in changed if is_protected(f, protect_globs(conn))]
             if hit:
                 refuse(conn, sub, "protected paths changed: %s. Only the lead may change them. "
                        "Remove these changes, and post a question note if a check or gate is wrong." % ", ".join(hit), None)
@@ -1234,46 +1479,39 @@ def merge_one(conn) -> bool:
             refuse(conn, sub, "gate failed (exit %d) after merging onto %s. Log: %s\nLast lines:\n%s"
                    % (rc, tip[:10], log_path, tail(log_path)), log_path)
             return True
-        greens = conn.execute("SELECT * FROM milestones WHERE status = 'green' ORDER BY id").fetchall()
-        for m in greens:
+        for m in conn.execute("SELECT * FROM milestones WHERE status = 'green' ORDER BY id").fetchall():
             rc = run_cmd(m["check_cmd"], tdir, int(cfg(conn, "check_timeout")), log_path)
             if rc != 0:
                 reset_trunk_dir(tdir, tip)
                 refuse(conn, sub, "milestone %s was green and its check fails after this change (exit %d). Log: %s\nLast lines:\n%s"
                        % (m["id"], rc, log_path, tail(log_path)), log_path)
                 return True
+        # Record the landing before trunk moves: a crash between the two is finished on restart.
+        with tx(conn):
+            set_cfg(conn, "landing", "L%d %s %s" % (sub["id"], new, tip))
         r = run_git(["update-ref", "refs/heads/" + trunk, new, tip], check=False)
         if r.returncode != 0:
             reset_trunk_dir(tdir, tip)
             with tx(conn):
+                set_cfg(conn, "landing", "")
                 conn.execute("UPDATE landed SET status = 'queued' WHERE id = ?", (sub["id"],))
                 log_event(conn, "queue", "loop", "stopped: %s moved during the gate" % trunk)
-            raise Fail("%s moved while the gate ran. Find who committed to trunk, then restart the loop." % trunk)
-        with tx(conn):
-            set_cfg(conn, "trunk_tip", new)
-            conn.execute(
-                "UPDATE landed SET status = 'merged', merged_sha = ?, log = ?, decided_at = ? WHERE id = ?",
-                (new, str(log_path), now(), sub["id"]),
-            )
-            if sub["task"]:
-                conn.execute(
-                    "UPDATE tasks SET status = 'landed', updated_at = ? WHERE id = ? AND status = 'queued'",
-                    (now(), sub["task"]),
-                )
-            log_event(conn, "queue", "merged", "L%d %sby %s -> %s" % (
-                sub["id"], "T%d " % sub["task"] if sub["task"] else "", sub["agent"], new[:10]))
-        if sub["task"]:
-            m = get_milestone(conn, get_task(conn, sub["task"])["milestone"])
-            if m["status"] == "red":
-                rc = run_cmd(m["check_cmd"], tdir, int(cfg(conn, "check_timeout")), log_path)
-                if rc == 0:
-                    with tx(conn):
-                        conn.execute(
-                            "UPDATE milestones SET status = 'green', green_sha = ?, updated_at = ? WHERE id = ?",
-                            (new, now(), m["id"]),
-                        )
-                        log_event(conn, "queue", "green", "%s %s at %s" % (m["id"], m["title"], new[:10]))
+            raise Fail("%s moved while the gate ran. Restart the loop with --reset-trunk to undo it, "
+                       "or --accept-trunk to keep it." % trunk)
+        record_landing(conn, sub, new, log_path)
+        judge(conn, red_to_check(conn, sub["task"]), tdir, new, log_path, "queue")
+        # The gate and checks may rewrite or add files; leave the worktree clean.
+        reset_trunk_dir(tdir, new)
     return True
+
+
+def ensure_guard(conn):
+    """Keep the trunk branch checked out, with no files, in a guard worktree.
+    Git then refuses `git switch <trunk>` in every other worktree, so only the
+    queue moves trunk."""
+    guard = Path(cfg(conn, "root")) / ".team-build" / ".guard"
+    if not guard.exists():
+        git("worktree", "add", "--quiet", "--no-checkout", str(guard), cfg(conn, "trunk"), cwd=cfg(conn, "root"))
 
 
 def cmd_merge_loop(a):
@@ -1287,30 +1525,57 @@ def cmd_merge_loop(a):
         conn.execute("UPDATE landed SET status = 'queued' WHERE status = 'merging'")
     trunk = cfg(conn, "trunk")
     tdir = cfg(conn, "trunk_dir")
-    stopping = []
-    signal.signal(signal.SIGTERM, lambda *_: stopping.append(True))
+
+    def on_term(*_):
+        STOP["requested"] = True
+        if STOP["pgid"]:
+            kill_group(STOP["pgid"])
+    signal.signal(signal.SIGTERM, on_term)
     try:
         with trunk_lock():
-            on_branch = run_git(["symbolic-ref", "--quiet", "HEAD"], cwd=tdir, check=False).returncode == 0
-            if on_branch and dirty(tdir):
-                raise Fail("the trunk worktree has uncommitted changes. Commit or discard them first.")
             tip = rev(trunk)
             last = cfg(conn, "trunk_tip")
-            if last and last != tip and not a.accept_trunk:
-                raise Fail("%s is at %s, but the queue last landed %s. Someone committed to trunk. "
-                           "Check it, then restart with --accept-trunk." % (trunk, tip[:10], last[:10]))
-            reset_trunk_dir(tdir, tip)
+            pending = cfg(conn, "landing")
+            if pending:
+                lid, new, old = pending.split()
+                if tip == new and last == old:
+                    sub = conn.execute("SELECT * FROM landed WHERE id = ?", (int(lid[1:]),)).fetchone()
+                    record_landing(conn, sub, new, board_dir() / "logs" / ("%s.log" % lid),
+                                   "recorded after the loop stopped")
+                    print("Recorded %s: it reached trunk just before the loop stopped." % lid, flush=True)
+                    last = new
+                else:
+                    with tx(conn):
+                        set_cfg(conn, "landing", "")
+            if last and last != tip:
+                if a.reset_trunk:
+                    stray = "team-stray/" + tip[:10]
+                    git("branch", "-f", stray, tip)
+                    git("update-ref", "refs/heads/" + trunk, last, tip)
+                    with tx(conn):
+                        log_event(conn, "lead", "loop", "trunk reset to %s; stray commits saved on %s" % (last[:10], stray))
+                    print("Put %s back at %s. The stray commits are on branch %s; submit it with "
+                          "`board submit --branch %s` if you want them." % (trunk, last[:10], stray, stray), flush=True)
+                    tip = last
+                elif not a.accept_trunk:
+                    raise Fail("%s is at %s, but the queue last landed %s: commits reached trunk outside the queue. "
+                               "Restart with --reset-trunk to put trunk back and save those commits on a branch you can "
+                               "submit, or with --accept-trunk to keep them without the gate." % (trunk, tip[:10], last[:10]))
+            prepare_trunk_dir(conn, tdir, tip)
+            ensure_guard(conn)
             with tx(conn):
                 set_cfg(conn, "trunk_tip", tip)
                 log_event(conn, "queue", "loop", "started (pid %d) at %s" % (os.getpid(), tip[:10]))
         print("Merge loop running (pid %d). Trunk %s at %s." % (os.getpid(), trunk, tip[:10]), flush=True)
-        while not stopping:
+        while not STOP["requested"]:
             if merge_one(conn):
-                last = conn.execute("SELECT * FROM events WHERE kind IN ('merged', 'refused', 'green') ORDER BY id DESC LIMIT 1").fetchone()
+                last = conn.execute(
+                    "SELECT * FROM events WHERE kind IN ('merged', 'refused', 'green', 'suspect') ORDER BY id DESC LIMIT 1"
+                ).fetchone()
                 if last:
                     print("%s %s" % (last["kind"], last["body"]), flush=True)
                 continue
-            if a.once:
+            if a.once or STOP["requested"]:
                 break
             time.sleep(2)
     finally:
@@ -1330,27 +1595,24 @@ def cmd_recheck(a):
         rows = [get_milestone(conn, m) for m in a.milestones]
     else:
         rows = conn.execute("SELECT * FROM milestones WHERE status IN ('red', 'green') ORDER BY priority, id").fetchall()
+    log = board_dir() / "logs" / ("recheck-%s.log" % int(time.time()))
     with trunk_lock():
-        on_branch = run_git(["symbolic-ref", "--quiet", "HEAD"], cwd=tdir, check=False).returncode == 0
-        if on_branch and dirty(tdir):
-            raise Fail("the trunk worktree has uncommitted changes. Commit or discard them first.")
         tip = rev(trunk)
-        if not on_branch:
-            reset_trunk_dir(tdir, tip)
-        results = run_milestone_checks(conn, rows, tdir, "recheck")
+        on_branch = run_git(["symbolic-ref", "--quiet", "HEAD"], cwd=tdir, check=False).returncode == 0
+        if on_branch:
+            # Before the first merge loop the lead builds the skeleton here, on the branch.
+            if dirty(tdir):
+                raise Fail("the trunk worktree has uncommitted changes. Commit or discard them first.")
+        else:
+            prepare_trunk_dir(conn, tdir, tip)
+        results = judge(conn, rows, tdir, tip, log, "lead")
+        git("reset", "--quiet", "--hard", "HEAD", cwd=tdir)
     all_green = True
-    with tx(conn):
-        for m, rc, log in results:
-            state = "green" if rc == 0 else "red"
-            if rc != 0:
-                all_green = False
-            print("%-8s %s (exit %d)%s" % (m["id"], state.upper(), rc, "" if rc == 0 else "  log " + str(log)))
-            if m["status"] != state and m["status"] in ("red", "green"):
-                conn.execute(
-                    "UPDATE milestones SET status = ?, green_sha = ?, updated_at = ? WHERE id = ?",
-                    (state, tip if rc == 0 else None, now(), m["id"]),
-                )
-                log_event(conn, "lead", state, "%s %s at %s (recheck)" % (m["id"], m["title"], tip[:10]))
+    for m, rc, stubs in results:
+        ok = rc == 0 and not stubs
+        all_green = all_green and ok
+        why = "" if ok else ("  %d STUB marker(s) remain, so it stays red" % len(stubs) if stubs else "  log " + str(log))
+        print("%-8s %s (exit %d)%s" % (m["id"], "GREEN" if ok else "RED", rc, why))
     print("Trunk %s @ %s. STUB markers: %d." % (trunk, tip[:10], stub_count(trunk)))
     return 0 if all_green else 1
 
@@ -1363,6 +1625,10 @@ def cmd_archive(a):
     active = [r["name"] for r in conn.execute("SELECT name FROM agents WHERE role = 'helper' AND state = 'active'")]
     if active:
         raise Fail("helpers are still active: %s. Wait for them, then `board leave <name>` for each." % ", ".join(active))
+    waiting = [r["id"] for r in conn.execute("SELECT id FROM landed WHERE status IN ('queued', 'merging') ORDER BY id")]
+    if waiting:
+        raise Fail("submissions still wait in the queue: %s. Run `board merge-loop --once` to decide them first."
+                   % ", ".join("L%d" % i for i in waiting))
     trunk = cfg(conn, "trunk")
     tdir = cfg(conn, "trunk_dir")
     tip = rev(trunk)
@@ -1372,6 +1638,9 @@ def cmd_archive(a):
             raise Fail("the trunk worktree is at %s, not at %s. Check it before you archive." % (head[:10], tip[:10]))
         git("worktree", "remove", "--force", tdir)
         print("Removed the trunk worktree. Branch %s stays at %s." % (trunk, tip[:10]))
+    guard = Path(cfg(conn, "root")) / ".team-build" / ".guard"
+    if guard.exists():
+        git("worktree", "remove", "--force", str(guard))
     # Helper worktrees, plus any other worktree under .team-build/ (for
     # example the lead's branch for a protected change).
     team_dir = os.path.realpath(os.path.join(cfg(conn, "root"), ".team-build")) + os.sep
@@ -1482,7 +1751,8 @@ def build_parser():
     s.add_argument("--title", required=True)
     s.add_argument("--spec", help="what done means for this task and how to check it")
     s.add_argument("--milestone")
-    s.add_argument("--parent", type=int)
+    s.add_argument("--parent", type=int, help="split: the new task is a piece of this one, and opens when it lands")
+    s.add_argument("--after", type=int, help="open only when this task lands (0: at once, even with --parent)")
     s.set_defaults(fn=cmd_add)
 
     s = sub.add_parser("release", help="give a task back to the pool with a handoff note")
@@ -1528,7 +1798,9 @@ def build_parser():
 
     s = sub.add_parser("merge-loop", help="lead: run the merge queue (the only writer of trunk)")
     s.add_argument("--once", action="store_true", help="stop when the queue is empty")
-    s.add_argument("--accept-trunk", action="store_true", help="accept a trunk tip the queue did not land")
+    s.add_argument("--accept-trunk", action="store_true", help="keep commits that reached trunk outside the queue")
+    s.add_argument("--reset-trunk", action="store_true",
+                   help="put trunk back at the last landing; save stray commits on a team-stray/ branch")
     s.set_defaults(fn=cmd_merge_loop)
 
     s = sub.add_parser("recheck", help="lead: run milestone checks on trunk and update red/green")
@@ -1556,6 +1828,9 @@ def main(argv=None):
         return 1
     except sqlite3.OperationalError as e:
         print("board: database error: %s. Try again." % e, file=sys.stderr)
+        return 1
+    except sqlite3.IntegrityError as e:
+        print("board: the board refused the change: %s." % e, file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         return 130

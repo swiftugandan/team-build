@@ -1,0 +1,251 @@
+/* team-build: a signal box. Enamel panel grey, graphite ink, and the three
+   signal lamps. Colour only ever means a state: red is not yet, amber is in
+   the queue, green has landed. */
+
+:root {
+  --panel: #E8ECEF;
+  --panel-deep: #DCE2E7;
+  --sheet: #F5F7F8;
+  --ink: #1D2836;
+  --ink-soft: #4A5563;
+  --rail: #7D8996;
+  --rule: #C3CBD3;
+  --red: #C7352C;
+  --amber: #D99A16;
+  --green: #1F8A4E;
+  --lamp-off: #B4BCC5;
+  --on-ink: #F5F7F8;
+  --focus: #2462C2;
+
+  --sans: "Overpass", "Highway Gothic", "Helvetica Neue", Arial, sans-serif;
+  --mono: "Overpass Mono", ui-monospace, Menlo, monospace;
+
+  --measure: 38rem;
+  --frame: 70rem;
+  --gutter: clamp(1rem, 4vw, 3rem);
+
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --panel: #161E28;
+    --panel-deep: #1C2632;
+    --sheet: #121922;
+    --ink: #E3E8ED;
+    --ink-soft: #A6B0BC;
+    --rail: #6C7886;
+    --rule: #2D3946;
+    --red: #E2554B;
+    --amber: #E8AE33;
+    --green: #39B36D;
+    --lamp-off: #3A4654;
+    --on-ink: #121922;
+    --focus: #7FA8F0;
+    color-scheme: dark;
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--panel);
+  color: var(--ink);
+  font: 400 1.0625rem/1.6 var(--sans);
+  font-feature-settings: "kern", "liga";
+}
+
+a { color: inherit; text-decoration-thickness: 1px; text-underline-offset: 0.18em; }
+a:hover { text-decoration-thickness: 2px; }
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; border-radius: 2px; }
+
+code, pre, .mono { font-family: var(--mono); font-size: 0.875em; }
+
+.skip {
+  position: absolute; left: -999px; top: 0.5rem;
+  background: var(--ink); color: var(--on-ink); padding: 0.5rem 0.75rem;
+}
+.skip:focus { left: 0.5rem; }
+
+.frame { max-width: var(--frame); margin: 0 auto; padding: 0 var(--gutter); }
+
+/* Header */
+.top {
+  display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+  max-width: var(--frame); margin: 0 auto; padding: 1.25rem var(--gutter);
+}
+.wordmark {
+  display: inline-flex; align-items: center; gap: 0.5rem;
+  font-weight: 800; font-size: 1.125rem; letter-spacing: -0.01em; text-decoration: none;
+}
+.wordmark svg { width: 1.5rem; height: 1.5rem; }
+.top nav { display: flex; gap: 1.25rem; font-size: 0.9375rem; }
+.top nav a { text-decoration: none; color: var(--ink-soft); }
+.top nav a:hover { color: var(--ink); text-decoration: underline; }
+
+/* Hero */
+.hero { padding-top: clamp(2rem, 6vw, 4.5rem); padding-bottom: 1.5rem; }
+.hero h1 {
+  margin: 0; max-width: 15ch;
+  font-weight: 800; font-size: clamp(2.5rem, 6.4vw, 4.75rem);
+  line-height: 1.02; letter-spacing: -0.025em;
+}
+.lede { max-width: var(--measure); margin: 1.5rem 0 0; font-size: 1.1875rem; color: var(--ink-soft); }
+.actions { display: flex; flex-wrap: wrap; gap: 0.75rem 1.5rem; align-items: center; margin: 2rem 0 0; }
+.button {
+  display: inline-block; padding: 0.7rem 1.15rem 0.6rem;
+  background: var(--ink); color: var(--on-ink);
+  font-weight: 700; text-decoration: none; border-radius: 3px;
+}
+.button:hover { background: var(--ink-soft); }
+.quiet { font-weight: 600; }
+
+/* The track diagram */
+.yard {
+  margin: clamp(2rem, 5vw, 3.5rem) 0 0;
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+}
+.yard svg { display: block; width: 100%; height: auto; }
+.yard .rail { stroke: var(--rail); stroke-width: 3; fill: none; stroke-linecap: round; }
+.yard .trunk { stroke: var(--ink); stroke-width: 5; }
+.yard .sleeper { stroke: var(--rule); stroke-width: 2; }
+.yard text { font-family: var(--sans); fill: var(--ink-soft); font-size: 15px; }
+.yard .name { font-weight: 700; fill: var(--ink); }
+.yard .dim { opacity: 0.32; transition: opacity 300ms ease; }
+.yard .lit { opacity: 1; }
+.yard .lamp { fill: var(--lamp-off); transition: fill 250ms ease; }
+.yard .lamp.red { fill: var(--red); }
+.yard .lamp.amber { fill: var(--amber); }
+.yard .lamp.green { fill: var(--green); }
+.yard .head { fill: var(--ink); }
+.yard .gatebox { fill: var(--panel-deep); stroke: var(--rail); stroke-width: 1.5; }
+.yard .train rect { fill: var(--amber); }
+.yard .train text { fill: #1D2836; font-weight: 800; font-size: 13px; }
+.yard .train.landed rect { fill: var(--green); }
+.yard .train.landed text { fill: var(--on-ink); }
+.yard .tick { stroke: var(--green); stroke-width: 3; }
+
+.log {
+  margin: 0; padding: 0.9rem 1.1rem 1rem; list-style: none;
+  border-top: 1px solid var(--rule);
+  font-family: var(--mono); font-size: 0.8125rem; line-height: 1.7;
+  min-height: calc(4 * 1.7em + 1.9rem);
+}
+.log li { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--ink-soft); }
+.log li:last-child { color: var(--ink); }
+.log .k-green, .log .k-merged { color: var(--green); }
+.log .k-free, .log .k-left { color: var(--amber); }
+
+.yard-foot {
+  display: flex; flex-wrap: wrap; gap: 0.5rem 1.5rem; align-items: baseline; justify-content: space-between;
+  padding: 0 1.1rem 1rem; font-size: 0.9375rem; color: var(--ink-soft);
+}
+.yard-foot p { margin: 0; max-width: 46rem; }
+.replay {
+  font: 700 0.9375rem var(--sans); color: var(--ink);
+  background: none; border: 1px solid var(--rail); border-radius: 3px;
+  padding: 0.35rem 0.8rem 0.25rem; cursor: pointer;
+}
+.replay:hover { border-color: var(--ink); }
+.replay[hidden] { display: none; }
+
+/* Sections */
+.block { padding: clamp(3rem, 7vw, 5rem) 0 0; }
+.block h2 {
+  margin: 0; max-width: 24ch;
+  font-weight: 800; font-size: clamp(1.75rem, 3.4vw, 2.5rem); line-height: 1.1; letter-spacing: -0.02em;
+}
+.block > .frame > p, .intro { max-width: var(--measure); color: var(--ink-soft); margin: 1rem 0 0; }
+
+/* Steps: a real sequence, so they are numbered. */
+.steps {
+  margin: 2.25rem 0 0; padding: 0; list-style: none; counter-reset: step;
+  display: grid; gap: 0; grid-template-columns: repeat(5, minmax(0, 1fr));
+  border-top: 5px solid var(--ink);
+}
+.steps li { counter-increment: step; padding: 1.1rem 1.25rem 0 0; position: relative; }
+.steps li::before {
+  content: counter(step);
+  position: absolute; top: -0.9rem; left: 0;
+  width: 1.6rem; height: 1.6rem; border-radius: 50%;
+  background: var(--panel); border: 3px solid var(--ink);
+  font: 800 0.8125rem/1.25rem var(--sans); text-align: center;
+}
+.steps h3 { margin: 1rem 0 0.35rem; font-size: 1.125rem; font-weight: 800; }
+.steps p { margin: 0; font-size: 0.96875rem; color: var(--ink-soft); }
+
+/* Refusals */
+.refusals { width: 100%; max-width: 60rem; margin: 2rem 0 0; border-collapse: collapse; }
+.refusals th, .refusals td { text-align: left; vertical-align: top; padding: 0.9rem 1rem 0.9rem 0; border-top: 1px solid var(--rule); }
+.refusals th { width: 14rem; font-weight: 700; }
+.refusals th .lamp-dot { display: inline-block; width: 0.7rem; height: 0.7rem; border-radius: 50%; background: var(--red); margin-right: 0.55rem; vertical-align: 0.02em; }
+.refusals td code { color: var(--ink); background: var(--sheet); padding: 0.15rem 0.35rem; border-radius: 2px; display: inline; line-height: 1.75; }
+.note { max-width: var(--measure); margin: 1.5rem 0 0; color: var(--ink-soft); }
+
+/* Sources */
+.sources { width: 100%; max-width: 60rem; margin: 2rem 0 0; border-collapse: collapse; }
+.sources thead th { font-size: 0.9375rem; color: var(--ink-soft); font-weight: 600; text-align: left; padding: 0 1rem 0.6rem 0; }
+.sources td { vertical-align: top; padding: 0.9rem 1.5rem 0.9rem 0; border-top: 1px solid var(--rule); width: 50%; }
+.sources td:first-child { color: var(--ink-soft); }
+
+/* Install */
+.install { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 2rem 3rem; margin: 2rem 0 0; }
+.install h3 { margin: 0 0 0.6rem; font-size: 1.125rem; font-weight: 800; }
+.install p { margin: 0.9rem 0 0; color: var(--ink-soft); max-width: 32rem; }
+.cmd {
+  display: flex; align-items: flex-start; gap: 0.75rem;
+  background: var(--ink); color: var(--on-ink); border-radius: 4px;
+  padding: 0.85rem 0.75rem 0.85rem 1.1rem;
+}
+/* Commands never wrap mid-word: a long one scrolls inside its box. */
+.cmd pre { flex: 1; min-width: 0; margin: 0; font-size: 0.8125rem; white-space: pre; overflow-x: auto; line-height: 1.75; }
+.copy {
+  flex: none;
+  font: 700 0.8125rem var(--sans); color: var(--on-ink);
+  background: none; border: 1px solid currentColor; border-radius: 3px; padding: 0.3rem 0.6rem 0.2rem; cursor: pointer; opacity: 0.85;
+}
+.copy:hover { opacity: 1; }
+
+/* Footer */
+.foot {
+  max-width: var(--frame); margin: clamp(4rem, 8vw, 6rem) auto 0; padding: 1.5rem var(--gutter) 2.5rem;
+  border-top: 1px solid var(--rule); color: var(--ink-soft); font-size: 0.9375rem;
+  display: flex; flex-wrap: wrap; gap: 0.5rem 2rem; justify-content: space-between;
+}
+.foot p { margin: 0; }
+
+@media (max-width: 60rem) {
+  .steps { grid-template-columns: 1fr; border-top: 0; border-left: 5px solid var(--ink); margin-left: 0.8rem; }
+  .steps li { padding: 0 0 1.5rem 1.6rem; }
+  .steps li::before { top: 0; left: -1.15rem; }
+  .steps h3 { margin-top: 0; }
+  .install { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 48rem) {
+  /* The diagram fits the width; labels grow so they stay legible, and the
+     small sub-labels that would collide at this size are left out. */
+  .yard text { font-size: 24px; }
+  .yard .train text { font-size: 17px; }
+  .yard .sub { display: none; }
+}
+
+@media (max-width: 40rem) {
+  .top nav a:not(:last-child) { display: none; }
+  .refusals th, .refusals td { display: block; width: auto; padding-right: 0; }
+  .refusals td { border-top: 0; padding-top: 0; }
+  .sources thead { display: none; }
+  .sources td { display: block; width: auto; padding-right: 0; }
+  .sources td:last-child { border-top: 0; padding-top: 0.25rem; color: var(--ink); }
+  .sources td:first-child::before { content: "Article: "; font-weight: 700; }
+  .sources td:last-child::before { content: "team-build: "; font-weight: 700; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}

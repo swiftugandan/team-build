@@ -20,13 +20,15 @@ Start with `board join <name>`. It prints your orders: the announcements, your m
    - Never weaken a test or a check to make it pass: no skips, no sleeps, no retries until green, no looser asserts.
    - Do not change protected paths. If a check or the gate is wrong, post `board note --kind question` with the evidence and continue with other work.
    - Change only the files the task needs. In shared files (registries, routers, config), make the smallest change.
-   - **Too big? Split it. Never drop it.** Add each piece with `board add --parent <id> --title "..." --spec "..."`. Write each piece's interface as a stub that fails loudly with the marker `STUB(T<piece id>)`, code your part against it, and submit your part. Other helpers take the pieces. If you cannot even split it, run `board release <id> --reason "..."` and say what you learned.
+   - **Too big? Split it. Never drop it.** Add each piece with `board add --parent <id> --title "..." --spec "..."`. Write each piece's interface as a stub that fails loudly with the marker `STUB(T<piece id>)`, code your part against it, and submit your part soon. The pieces open to other helpers when your part lands, because it carries their stubs. If you cannot even split it, run `board release <id> --reason "..."` and say what you learned.
+   - **Stay on the board.** On a long task, run `board brief` at least every 30 minutes. A helper that is silent for 90 minutes is released. If a board command says you left the board, run `board join <your name>`, then `board claim`.
    - A decision you are not sure about: make the best call, write it in a `board note --kind progress`, and continue. The lead corrects it later if needed.
 6. **Submit.** Commit your work. Run `git rebase <trunk>` and run your checks again. Then run `board submit`.
 7. **Report and continue.** Post one line: `board note --task <id> --kind progress "..."`. Go back to step 1. Do not wait for the merge queue. If it refuses your work, `board claim` gives the task back to you with the reason:
    - Conflict: rebase onto trunk, resolve, run your checks again, submit again.
    - Gate or green milestone failed: read the log tail in the reason, fix the cause, submit again.
    - Protected path: remove that change and submit again.
+   - If `submit` says your work is already on trunk through another landing, the task is done. Go back to step 1.
    - Third refusal of the same task: post `board note --kind stuck` with the evidence, then `board release` it.
 8. **Exit** when `board claim` has no work, when you have submitted 4 tasks, or when an announcement tells you to stop. Before you exit:
    - Release every task you hold and cannot finish, with a handoff reason: what is done, which branch, what comes next.
@@ -41,6 +43,6 @@ The lead may make you captain of a milestone. You own its plan. Before you claim
 1. Read the milestone's acceptance check and the stubs it reaches.
 2. Post a verdict: `board note --kind verdict "<feasible | hard | infeasible in budget>: <estimate and why>"`. Base it on the work you can see, not on fear of the size. The lead checks it against the team's real throughput.
 3. Post the plan: `board note --kind plan "..."`. Give the route through the code, how the pieces fit, and which files each piece owns.
-4. Add the tasks with `board add`. Each task is small enough for one helper in one sitting, has its own test that goes from red to green, and touches its own files where possible. If pieces depend on each other, make the first task "land the interfaces as stubs", so the others can code against them.
+4. Add the tasks with `board add`. Each task is small enough for one helper in one sitting, has its own test that goes from red to green, and touches its own files where possible. If pieces depend on each other, make the first task "land the interfaces as stubs", and add the others with `--after <that task>`: they open when the stubs are on trunk.
 
 Then work tasks like any other helper. Keep the plan current: post a new plan note when the shape changes.

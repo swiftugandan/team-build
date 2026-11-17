@@ -47,17 +47,18 @@ board init --name <slug> --gate "<cmd>" --protect "<glob>" [--protect "<glob>" .
 ```
 
 - `--gate` is the fast check every landing must pass: build, type check, lint, unit tests. It runs once per landing, one landing at a time, so keep it to a few minutes. It runs in a separate worktree, so include install steps if the project needs them.
-- `--protect` names the paths only the lead may change: the acceptance checks and the scripts the gate calls. `*` matches across directories.
+- `--protect` names the paths only the lead may change: the acceptance checks, the scripts the gate calls, and every file that changes what a check or the gate runs (test runner config, `conftest.py`, the spec). `*` matches across directories, and a directory name protects everything under it.
 - `--max-helpers` is the number the user gave after the spec, else 6. One machine runs out of memory and CPU before the team runs out of work. Heavy jobs (full suites, image builds) run only in the merge queue.
 
 `init` makes the trunk branch from HEAD and checks it out in `.team-build/trunk`. It does not change the user's checkout.
 
 ## 3. Build the walking skeleton on trunk
 
-Work in `.team-build/trunk`. The merge queue does not run yet, so you are the only writer. Commit there:
+Work in `.team-build/trunk`. The merge queue does not run yet, so you are the only writer. Run git there with `git -C .team-build/trunk ...` and keep your shell in the main checkout: board commands work only from the main checkout. Commit there:
 
+- the spec and the milestone list, under a protected path (for example `docs/team-build/`). Helpers read only their own worktree, so this is how they see the spec;
 - a project that builds and passes the gate;
-- every acceptance check, under a protected path;
+- every acceptance check, under a protected path. Make each check hard to fool: a script that drives the product itself, or that runs the test runner with its own pinned config (for pytest: `--noconftest -c <protected ini>`). An unprotected config file must not be able to skip a check;
 - every interface the milestones need, as a stub that fails loudly and carries the marker `STUB(<milestone>)`, for example `raise NotImplementedError("STUB(M04)")`. Stubs let crews work in parallel: code can call a piece before the piece exists.
 - a layout where each milestone has its own files, so crews do not edit the same lines. Shared registration points (routers, CLI dispatch, dependency setup) cause most conflicts: make each entry one line;
 - checks that can run side by side in many worktrees: no fixed ports, no shared temp paths, no global state;
@@ -108,13 +109,15 @@ You wake when a helper finishes, when `board watch` prints an event, or when the
    - **Check verdicts against throughput.** Agents call hard work infeasible too early. In the source run, helpers judged 47 of 60 milestones infeasible within budget, and the team proved most of them. Compare each verdict with the measured rate in `board status` before you act on it. Park a milestone only with a written reason (`board milestone set M07 --status parked --reason "..."`), and unpark it when helpers come free. Nobody idles while a red milestone has work.
    - **Move helpers to the work.** When a milestone goes green, assign its crew to the red milestone with the most open tasks. When few milestones stay red, put most of the team on them. A large crew on one milestone works when its captain splits it into many small tasks.
    - **Fix repeat refusals.** A task refused three times has a problem in its spec or on trunk. Split it, rewrite it, or fix the trunk.
+   - **Act on `suspect` events.** A milestone goes green only when its check passes and none of its `STUB(...)` markers remain on trunk. A `suspect` event means a check passed while stubs remained: the check is too weak, or someone fooled it. Make the check stricter (below), and find the change that made it pass.
    - **Keep the team full.** While open work exists, keep `max_helpers` helpers running. Hire and spawn a new helper for each one that finished.
    - **Keep them going.** Every few hours, announce the time left and the progress. Tell free helpers to take open work on any red milestone without waiting for you.
    - Run `board reap` to reopen the tasks of helpers that went silent (90 minutes by default).
    - If the merge loop stopped without an error (killed, or ended with a session), start it again.
+   - If the merge loop says trunk moved outside the queue, restart it with `--reset-trunk`. That puts trunk back at the last landing and saves the stray commits on a `team-stray/` branch, which you can submit like any branch. Use `--accept-trunk` only after you have checked those commits yourself.
 4. Before you end a turn, make sure something will wake you: at least one helper runs, or `board watch` is armed.
 
-Change a protected file (an acceptance check, a gate script) or add a milestone only with the user's approval. Make the change in a worktree of your own: `git worktree add .team-build/lead-<topic> -b lead/<topic> team/<name>`. Commit there, then run `board submit --branch lead/<topic>` from the main checkout. The queue accepts protected paths only from the lead. Change the gate command with `board config gate "<cmd>"`.
+Change a protected file (an acceptance check, a gate script) or add a milestone only with the user's approval. Make the change in a worktree of your own: `git worktree add .team-build/lead-<topic> -b lead/<topic> team/<name>`. Commit there, then run `board submit --branch lead/<topic>` from the main checkout. The queue accepts protected paths only from the lead, and after your landing it rechecks every red milestone. To make a green milestone's check stricter, first run `board milestone set <id> --status red`: the queue refuses any change that makes a green check fail. Change the gate command with `board config gate "<cmd>"`.
 
 Ask the user only when a milestone or a check must change, when you want to drop a milestone, when the budget is spent, or when the merge loop stopped with an error you cannot fix.
 
@@ -125,7 +128,7 @@ The run is done when all of these are true:
 - `board recheck` shows every milestone green, except milestones the user agreed to drop.
 - `board status` shows 0 STUB markers on trunk.
 - The full test suite passes on trunk, and you ran the product end to end on trunk the way a user would. Do this in a fresh worktree (`git worktree add --detach .team-build/verify team/<name>`). Use the project's verify skill if it has one.
-- An independent review of the trunk diff against the base found no open important issues. Spawn a fresh agent to run /code-review (or /review) on `<base>..team/<name>`; `board config` shows the base. Turn each finding into a task and go back to step 5.
+- An independent review of the trunk diff against the base found no open important issues. Spawn a fresh agent to run /code-review (or /review) on `<base>..team/<name>`; `board config` shows the base. Turn each finding into a task on its milestone (`board add --milestone <id>`) and go back to step 5. Helpers take open work on green milestones once no red work is left.
 - The README and the docs describe the product as built.
 
 Then:

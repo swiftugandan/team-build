@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>team-build: a crew of agents builds it, the checks decide what lands</title>
+  <meta name="description" content="team-build is a Claude Code plugin for large projects. A lead agent turns your spec into milestones with acceptance checks and runs a crew of helper agents. They coordinate through one SQL board, and a merge queue lands only work that passes.">
+  <meta property="og:title" content="team-build: a crew of agents builds it, the checks decide what lands">
+  <meta property="og:description" content="A Claude Code plugin. A lead agent runs a crew of helpers through one SQL board and git. A merge queue lands only work that passes the checks.">
+  <meta property="og:image" content="https://swiftugandan.github.io/team-build/og.png">
+  <meta property="og:url" content="https://swiftugandan.github.io/team-build/">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="theme-color" content="#1D2836">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Overpass:wght@400;600;700;800&family=Overpass+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="top">
+    <a class="wordmark" href="./" aria-label="team-build home">
+      <svg viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="9" y="2" width="14" height="24" rx="7" fill="currentColor"/>
+        <circle cx="16" cy="9" r="4" fill="var(--lamp-off)"/>
+        <circle cx="16" cy="19" r="4" fill="var(--green)"/>
+        <rect x="15" y="26" width="2" height="5" fill="currentColor"/>
+      </svg>
+      team-build
+    </a>
+    <nav aria-label="Main">
+      <a href="#how">How it works</a>
+      <a href="#install">Install</a>
+      <a href="https://github.com/swiftugandan/team-build">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero frame" aria-labelledby="hero-title">
+      <h1 id="hero-title">A crew of agents builds it. The checks decide what lands.</h1>
+      <p class="lede">team-build is a Claude Code plugin for large projects. A lead agent turns your spec into milestones with acceptance checks, then runs a crew of helper agents, each in its own git worktree. They coordinate through one SQL board, and a merge queue lands only work that passes.</p>
+      <p class="actions">
+        <a class="button" href="#install">Install the plugin</a>
+        <a class="quiet" href="https://github.com/swiftugandan/team-build/blob/main/docs/design.md">Read the design</a>
+      </p>
+
+      <figure class="yard" aria-labelledby="yard-caption">
+        <svg id="yard" viewBox="0 0 1000 320" role="img" aria-labelledby="yard-title yard-desc">
+          <title id="yard-title">The trial run as a track diagram</title>
+          <desc id="yard-desc">Seven helper and lead tracks feed one merge queue. Seven landings reach the trunk branch, and the four milestone signals M01 to M04 all show green.</desc>
+          <defs>
+            <path id="p-lead" d="M100,40 L250,40 C330,40 320,262 400,262 L470,262 C500,262 510,290 540,290 L966,290"/>
+            <path id="p-h01" d="M100,72 L250,72 C330,72 320,262 400,262 L470,262 C500,262 510,290 540,290 L966,290"/>
+            <path id="p-h02" d="M100,104 L250,104 C330,104 320,262 400,262 L470,262 C500,262 510,290 540,290 L966,290"/>
+            <path id="p-h03" d="M100,136 L250,136 C330,136 320,262 400,262 L470,262 C500,262 510,290 540,290 L966,290"/>
+            <path id="p-h04" d="M100,168 L250,168 C330,168 320,262 400,262 L470,262 C500,262 510,290 540,290 L966,290"/>
+            <path id="p-h05" d="M100,200 L250,200 C330,200 320,262 400,262 L470,262 C500,262 510,290 540,290 L966,290"/>
+            <path id="p-h06" d="M100,232 L250,232 C330,232 320,262 400,262 L470,262 C500,262 510,290 540,290 L966,290"/>
+          </defs>
+
+          <g class="sidings">
+            <g data-agent="lead" class="lit"><text x="70" y="45" text-anchor="end" class="name">lead</text><path class="rail" d="M82,40 L250,40 C330,40 320,262 400,262"/></g>
+            <g data-agent="h01" class="lit"><text x="70" y="77" text-anchor="end" class="name">h01</text><path class="rail" d="M82,72 L250,72 C330,72 320,262 400,262"/></g>
+            <g data-agent="h02" class="lit"><text x="70" y="109" text-anchor="end" class="name">h02</text><path class="rail" d="M82,104 L250,104 C330,104 320,262 400,262"/></g>
+            <g data-agent="h03" class="lit"><text x="70" y="141" text-anchor="end" class="name">h03</text><path class="rail" d="M82,136 L250,136 C330,136 320,262 400,262"/></g>
+            <g data-agent="h04" class="lit"><text x="70" y="173" text-anchor="end" class="name">h04</text><path class="rail" d="M82,168 L250,168 C330,168 320,262 400,262"/></g>
+            <g data-agent="h05" class="lit"><text x="70" y="205" text-anchor="end" class="name">h05</text><path class="rail" d="M82,200 L250,200 C330,200 320,262 400,262"/></g>
+            <g data-agent="h06" class="lit"><text x="70" y="237" text-anchor="end" class="name">h06</text><path class="rail" d="M82,232 L250,232 C330,232 320,262 400,262"/></g>
+          </g>
+
+          <path class="rail" d="M400,262 L470,262 C500,262 510,290 540,290"/>
+          <path class="rail trunk" d="M30,290 L966,290"/>
+          <path class="rail trunk" d="M970,276 L970,304"/>
+          <text x="30" y="314"><tspan class="name">trunk</tspan> team/trial</text>
+
+          <g class="gate">
+            <text x="470" y="186" text-anchor="middle">merge queue</text>
+            <rect class="head" x="455" y="194" width="30" height="42" rx="15"/>
+            <circle id="gate-lamp" class="lamp" cx="470" cy="215" r="9"/>
+            <path class="rail" d="M470,236 L470,262"/>
+          </g>
+
+          <g class="signals">
+            <text x="595" y="24">Milestone checks on trunk</text>
+            <g data-milestone="M01"><rect class="head" x="625" y="38" width="30" height="56" rx="15"/><circle class="lamp" cx="640" cy="54" r="9"/><circle class="lamp green" cx="640" cy="78" r="9"/><text x="640" y="116" text-anchor="middle" class="name">M01</text><text x="640" y="134" text-anchor="middle" class="sub">count</text></g>
+            <g data-milestone="M02"><rect class="head" x="715" y="38" width="30" height="56" rx="15"/><circle class="lamp" cx="730" cy="54" r="9"/><circle class="lamp green" cx="730" cy="78" r="9"/><text x="730" y="116" text-anchor="middle" class="name">M02</text><text x="730" y="134" text-anchor="middle" class="sub">slug</text></g>
+            <g data-milestone="M03"><rect class="head" x="805" y="38" width="30" height="56" rx="15"/><circle class="lamp" cx="820" cy="54" r="9"/><circle class="lamp green" cx="820" cy="78" r="9"/><text x="820" y="116" text-anchor="middle" class="name">M03</text><text x="820" y="134" text-anchor="middle" class="sub">roman</text></g>
+            <g data-milestone="M04"><rect class="head" x="895" y="38" width="30" height="56" rx="15"/><circle class="lamp" cx="910" cy="54" r="9"/><circle class="lamp green" cx="910" cy="78" r="9"/><text x="910" y="116" text-anchor="middle" class="name">M04</text><text x="910" y="134" text-anchor="middle" class="sub">stats</text></g>
+          </g>
+
+          <g class="trains">
+            <g class="train landed" id="L1" data-from="h01" transform="translate(931,290)"><rect x="-23" y="-11" width="46" height="22" rx="3"/><text text-anchor="middle" y="5">L1</text></g>
+            <g class="train landed" id="L2" data-from="h02" transform="translate(873,290)"><rect x="-23" y="-11" width="46" height="22" rx="3"/><text text-anchor="middle" y="5">L2</text></g>
+            <g class="train landed" id="L3" data-from="h03" transform="translate(815,290)"><rect x="-23" y="-11" width="46" height="22" rx="3"/><text text-anchor="middle" y="5">L3</text></g>
+            <g class="train landed" id="L4" data-from="lead" transform="translate(757,290)"><rect x="-23" y="-11" width="46" height="22" rx="3"/><text text-anchor="middle" y="5">L4</text></g>
+            <g class="train landed" id="L5" data-from="h04" transform="translate(699,290)"><rect x="-23" y="-11" width="46" height="22" rx="3"/><text text-anchor="middle" y="5">L5</text></g>
+            <g class="train landed" id="L6" data-from="h04" transform="translate(641,290)"><rect x="-23" y="-11" width="46" height="22" rx="3"/><text text-anchor="middle" y="5">L6</text></g>
+            <g class="train landed" id="L7" data-from="h04" transform="translate(583,290)"><rect x="-23" y="-11" width="46" height="22" rx="3"/><text text-anchor="middle" y="5">L7</text></g>
+          </g>
+        </svg>
+
+        <ol class="log" id="log" aria-label="Board events">
+          <li class="k-merged">14:45:53 merged queue: L6 T5 by h04 -&gt; d8235f0d12</li>
+          <li class="k-left">14:46:00 left h04: h04 left</li>
+          <li class="k-merged">14:46:02 merged queue: L7 T6 by h04 -&gt; 13565ec05e</li>
+          <li class="k-green">14:46:02 green queue: M04 stats: JSON report on a file built from count, slug and roman plus word frequency</li>
+        </ol>
+        <div class="yard-foot">
+          <p id="yard-caption">The trial run on 17 November 2026, replayed from its board log: six helpers, four milestones, seven landings and no refusals in just over two minutes. h05 and h06 left before their captain had split M04. Helpers now wait for their captain's tasks.</p>
+          <button class="replay" type="button" hidden>Replay</button>
+        </div>
+      </figure>
+    </section>
+
+    <section id="how" class="block" aria-labelledby="how-title">
+      <div class="frame">
+        <h2 id="how-title">How a run goes</h2>
+        <p>You agree the milestones with the lead. After that, the crew works on its own until every milestone is green.</p>
+        <ol class="steps">
+          <li><h3>Scope</h3><p>You and the lead agree on milestones. Each one has an acceptance check: a command that passes only when the feature works end to end.</p></li>
+          <li><h3>Skeleton</h3><p>The lead builds a skeleton on a trunk branch. Every check runs and fails, and each missing piece is a stub that fails loudly.</p></li>
+          <li><h3>Staff</h3><p>The lead hires helpers into their own worktrees and names a captain for each milestone. Captains post a plan and split the work into tasks.</p></li>
+          <li><h3>Run</h3><p>Helpers claim tasks, build, test and submit. The merge queue lands one submission at a time. The lead moves helpers to where work is open.</p></li>
+          <li><h3>Finish</h3><p>With every milestone green, the lead runs the product end to end, gets an independent review, and hands you the trunk branch.</p></li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="block" aria-labelledby="queue-title">
+      <div class="frame">
+        <h2 id="queue-title">What the merge queue refuses</h2>
+        <p>Trunk moves only after the gate passes, and only by compare-and-swap, so a crash never leaves unchecked code on it. A refused task goes back to the helper who submitted it, with the reason.</p>
+        <table class="refusals">
+          <tbody>
+            <tr><th scope="row"><span class="lamp-dot" aria-hidden="true"></span>A merge conflict</th><td><code>merge conflict in: textkit/cli.py. Rebase onto team/trial, resolve, rerun your checks, then submit again.</code></td></tr>
+            <tr><th scope="row"><span class="lamp-dot" aria-hidden="true"></span>The gate fails</th><td><code>gate failed (exit 1) after merging onto 8c3998f3ed.</code> The last 40 lines of the log follow.</td></tr>
+            <tr><th scope="row"><span class="lamp-dot" aria-hidden="true"></span>A green milestone breaks</th><td><code>milestone M01 was green and its check fails after this change (exit 1).</code></td></tr>
+            <tr><th scope="row"><span class="lamp-dot" aria-hidden="true"></span>A protected path changes</th><td><code>protected paths changed: acceptance/test_m01.py. Only the lead may change them.</code></td></tr>
+          </tbody>
+        </table>
+        <p class="note">Helpers never push and never write trunk. Only the lead can change an acceptance check, and only with your approval.</p>
+      </div>
+    </section>
+
+    <section class="block" aria-labelledby="sources-title">
+      <div class="frame">
+        <h2 id="sources-title">Where the ideas come from</h2>
+        <p>The design follows <a href="https://claude.dev/blog/safely-scaling-multi-agent-teams-with-fable-5-2/">Safely scaling multi-agent teams with Claude Fable 5.2</a>, in which a lead and 999 helpers reproduced a Lean proof of Fermat's Last Theorem in 28.7 hours. Lean gave that team a checker. For software, acceptance checks play that part, in the way <a href="https://claude.dev/blog/how-the-claude-code-team-thinks-about-verification/">How the Claude Code team thinks about verification</a> describes.</p>
+        <table class="sources">
+          <thead><tr><th scope="col">In the article</th><th scope="col">In team-build</th></tr></thead>
+          <tbody>
+            <tr><td>Agents coordinated through a SQL database and git, with no messaging.</td><td>The board: one SQLite file in <code>.git</code> that every worktree opens.</td></tr>
+            <tr><td>Each statement stayed a placeholder until Lean accepted a proof.</td><td>Each milestone stays red until its acceptance check passes on trunk.</td></tr>
+            <tr><td>Helpers judged 47 of 60 statements infeasible, and the team proved most of them.</td><td>The lead checks each verdict against measured throughput before it parks any work.</td></tr>
+            <tr><td>A separate job merged work into main and refused conflicts and faults.</td><td>The merge queue is the only writer of trunk.</td></tr>
+            <tr><td>Hard statements became a task tree, up to 10 levels deep.</td><td>Any helper splits a task that is too big and codes against stubs for the pieces.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="install" class="block" aria-labelledby="install-title">
+      <div class="frame">
+        <h2 id="install-title">Install</h2>
+        <div class="install">
+          <div>
+            <h3>Add the plugin</h3>
+            <div class="cmd"><pre>/plugin marketplace add swiftugandan/team-build
+/plugin install team-build@team-build</pre><button class="copy" type="button" data-copy="/plugin marketplace add swiftugandan/team-build&#10;/plugin install team-build@team-build">Copy</button></div>
+            <p>Run these in Claude Code. You need git, Python 3.9 or later, and macOS or Linux. Every agent runs on the machine that holds the repo.</p>
+          </div>
+          <div>
+            <h3>Start a run</h3>
+            <div class="cmd"><pre>/team-build:team-build docs/prd.md</pre><button class="copy" type="button" data-copy="/team-build:team-build docs/prd.md">Copy</button></div>
+            <p>Open Claude Code in the repo to build and give it your spec. Put a number after the spec to set the crew size; the default is 6. Your checkout stays as it is, and the result arrives on its own branch.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <p>MIT licence. Source and design notes on <a href="https://github.com/swiftugandan/team-build">GitHub</a>.</p>
+    <p>Not affiliated with Anthropic.</p>
+  </footer>
+
+  <script src="replay.js" defer></script>
+</body>
+</html>
