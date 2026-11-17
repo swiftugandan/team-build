@@ -150,7 +150,7 @@ class Interrupted(Exception):
 # worktree. `pgfile` (set by the merge loop) records those groups on disk, so
 # a loop killed outright can still stop them when it starts again.
 STOP = {"requested": False, "pgids": set(), "pgfile": None}
-STOP_LOCK = threading.Lock()
+STOP_LOCK = threading.RLock()  # re-entrant: the signal handler runs on the main thread
 
 
 def track_group(pgid, add):
@@ -158,6 +158,31 @@ def track_group(pgid, add):
         (STOP["pgids"].add if add else STOP["pgids"].discard)(pgid)
         if STOP["pgfile"]:
             Path(STOP["pgfile"]).write_text("".join("%d\n" % g for g in sorted(STOP["pgids"])))
+
+
+def stop_leftover_groups(pgfile):
+    """Stop the commands a loop killed outright left running. An ID can be reused by an
+    unrelated process, so only a group whose leader is still a shell started by a
+    team-build loop in the trunk worktree is stopped."""
+    tdir_marker = os.sep + ".team-build" + os.sep + "trunk"
+    for line in pgfile.read_text().split():
+        pgid = int(line)
+        if tdir_marker in process_cwd(pgid):
+            kill_group(pgid)
+    pgfile.unlink()
+
+
+def process_cwd(pid) -> str:
+    """A process's working directory, or '' when it is gone or cannot be read."""
+    try:
+        return os.readlink("/proc/%d/cwd" % pid)
+    except OSError:
+        pass
+    try:
+        r = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"], capture_output=True, text=True)
+    except OSError:
+        return ""
+    return "\n".join(ln[1:] for ln in r.stdout.splitlines() if ln.startswith("n"))
 
 # A task is ready to claim when the task it waits for has landed.
 READY = "(t.after IS NULL OR EXISTS (SELECT 1 FROM tasks d WHERE d.id = t.after AND d.status = 'landed'))"
@@ -258,7 +283,17 @@ def set_cfg(conn, key, value):
 
 
 def protect_globs(conn):
-    return [g for g in cfg(conn, "protect", "").split("\n") if g.strip()]
+    """Protect patterns; a leading / or ./ only anchors to the repo root, which a pattern
+    with a / does already, so it is dropped."""
+    out = []
+    for g in cfg(conn, "protect", "").split("\n"):
+        g = g.strip()
+        while g.startswith("./"):
+            g = g[2:]
+        g = g.lstrip("/")
+        if g:
+            out.append(g)
+    return out
 
 
 def is_protected(path, globs) -> bool:
@@ -353,16 +388,6 @@ def dirty(cwd) -> str:
     return git("status", "--porcelain", "--untracked-files=no", cwd=cwd)
 
 
-def pid_alive(pid) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
 def loop_running() -> bool:
     """The merge loop holds loop.lock for its whole life. A lock survives pid
     reuse, and the kernel releases it however the loop dies."""
@@ -411,7 +436,7 @@ def run_cmd(cmd, cwd, timeout, log_path) -> int:
 def kill_group(pgid):
     try:
         os.killpg(pgid, signal.SIGKILL)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         pass
 
 
@@ -423,7 +448,7 @@ def untracked_files(cwd):
 def stub_markers(conn, ref):
     """STUB markers on ref as (path, line, milestone). Protected paths are
     skipped: a spec or a check may mention a marker without being one."""
-    r = run_git(["grep", "-n", "-o", "-E", r"STUB\([A-Za-z0-9_-]+\)", ref], check=False)
+    r = run_git(["grep", "-n", "-o", "-E", r"STUB\([A-Za-z0-9_-]+\)", ref], cwd=cfg(conn, "root"), check=False)
     globs = protect_globs(conn)
     task_milestone = dict((r2["id"], r2["milestone"]) for r2 in conn.execute("SELECT id, milestone FROM tasks"))
     out = []
@@ -615,9 +640,11 @@ def cmd_config(a):
                     raise Fail("the trunk worktree has uncommitted changes or new files. Commit or remove them first.")
             else:
                 prepare_trunk_dir(conn, tdir, rev(cfg(conn, "trunk")))
-            rc = run_cmd(value, tdir, int(cfg(conn, "gate_timeout")), log)
-            git("reset", "--quiet", "--hard", "HEAD", cwd=tdir)
-            git("clean", "-ffdq", cwd=tdir)
+            try:
+                rc = run_cmd(value, tdir, int(cfg(conn, "gate_timeout")), log)
+            finally:
+                git("reset", "--quiet", "--hard", "HEAD", cwd=tdir)
+                git("clean", "-ffdq", cwd=tdir)
         if rc != 0:
             raise Fail("the new gate fails on trunk as it stands (exit %d), so it would refuse every submission. "
                        "Log: %s. Fix trunk first, or pass --force." % (rc, log))
@@ -635,8 +662,9 @@ def cmd_milestone(a):
     me = whoami(conn)
     require_lead(me)
     if a.action == "add":
-        if not MILESTONE_RE.match(a.id):
-            raise Fail("milestone IDs use letters, digits, '-' and '_' (for example M01).")
+        if not MILESTONE_RE.match(a.id) or re.match(r"^T\d+$", a.id):
+            raise Fail("milestone IDs use letters, digits, '-' and '_' (for example M01), "
+                       "and cannot look like a task ID (T12).")
         if not a.title or not a.check:
             raise Fail("`milestone add` needs --title and --check.")
         if conn.execute("SELECT 1 FROM milestones WHERE id = ?", (a.id,)).fetchone():
@@ -685,17 +713,6 @@ def cmd_milestone(a):
     print("Milestone %s updated: %s." % (m["id"], ", ".join(changes)))
 
 
-def run_milestone_checks(conn, milestones, tdir, label):
-    """Run each milestone's check on the trunk worktree. Returns [(row, rc, log)]."""
-    timeout = int(cfg(conn, "check_timeout"))
-    results = []
-    for m in milestones:
-        log = board_dir() / "logs" / ("%s-%s-%s.log" % (label, m["id"], int(time.time())))
-        rc = run_cmd(m["check_cmd"], tdir, timeout, log)
-        results.append((m, rc, log))
-    return results
-
-
 def cmd_preflight(a):
     conn = open_board()
     me = whoami(conn)
@@ -710,34 +727,12 @@ def cmd_preflight(a):
             raise Fail("the trunk worktree has files that are not committed: %s. "
                        "`git add` and commit them, or remove them." % ", ".join(new_files[:10]))
         log = board_dir() / "logs" / ("preflight-gate-%s.log" % int(time.time()))
-        rc = run_cmd(cfg(conn, "gate"), tdir, int(cfg(conn, "gate_timeout")), log)
-        print("gate: %s (exit %d) log %s" % ("PASS" if rc == 0 else "FAIL", rc, log))
-        if rc != 0:
-            ok = False
-            print(indent(tail(log, 20)))
-        rows = conn.execute(
-            "SELECT * FROM milestones WHERE status IN ('red', 'green') ORDER BY priority, id"
-        ).fetchall()
-        if not rows:
-            ok = False
-            print("no milestones. Add them with `board milestone add`.")
-        for m, rc, log in run_milestone_checks(conn, rows, tdir, "preflight"):
-            if m["status"] == "green":
-                if rc != 0:
-                    ok = False
-                    print("%s: green, but its check fails now (exit %d). Run `board recheck %s`." % (m["id"], rc, m["id"]))
-                else:
-                    print("%s: green, and its check passes." % m["id"])
-            elif rc == 0:
-                ok = False
-                print("%s: PASSES already. The check is too weak, or the work exists. "
-                      "Fix the check, or run `board recheck %s` to mark it green." % (m["id"], m["id"]))
-            else:
-                print("%s: fails as expected (exit %d). Why:" % (m["id"], rc))
-                print(indent(failure_lines(log), "    "))
-        # The gate and checks may rewrite or add files (lock files, formatters, reports).
-        git("reset", "--quiet", "--hard", "HEAD", cwd=tdir)
-        git("clean", "-ffdq", cwd=tdir)
+        try:
+            ok = preflight_run(conn, tdir, log)
+        finally:
+            # The gate and checks may rewrite or add files (lock files, formatters, reports).
+            git("reset", "--quiet", "--hard", "HEAD", cwd=tdir)
+            git("clean", "-ffdq", cwd=tdir)
     print("STUB markers on trunk: %s" % stub_summary(conn, cfg(conn, "trunk"))[1])
     with tx(conn):
         log_event(conn, "lead", "preflight", "ok" if ok else "failed")
@@ -747,6 +742,36 @@ def cmd_preflight(a):
     print("Preflight passed. Read each failure above: it must fail at a STUB, "
           "not because the check itself is broken.")
     return 0
+
+
+def preflight_run(conn, tdir, log):
+    ok = True
+    rc = run_cmd(cfg(conn, "gate"), tdir, int(cfg(conn, "gate_timeout")), log)
+    print("gate: %s (exit %d) log %s" % ("PASS" if rc == 0 else "FAIL", rc, log))
+    if rc != 0:
+        ok = False
+        print(indent(tail(log, 20)))
+    rows = conn.execute(
+        "SELECT * FROM milestones WHERE status IN ('red', 'green') ORDER BY priority, id"
+    ).fetchall()
+    if not rows:
+        ok = False
+        print("no milestones. Add them with `board milestone add`.")
+    for m, rc, check_log in run_checks(conn, rows, tdir, log):
+        if m["status"] == "green":
+            if rc != 0:
+                ok = False
+                print("%s: green, but its check fails now (exit %d). Run `board recheck %s`." % (m["id"], rc, m["id"]))
+            else:
+                print("%s: green, and its check passes." % m["id"])
+        elif rc == 0:
+            ok = False
+            print("%s: PASSES already. The check is too weak, or the work exists. "
+                  "Fix the check, or run `board recheck %s` to mark it green." % (m["id"], m["id"]))
+        else:
+            print("%s: fails as expected (exit %d). Why:" % (m["id"], rc))
+            print(indent(failure_lines(check_log), "    "))
+    return ok
 
 
 def cmd_announce(a):
@@ -1069,7 +1094,9 @@ def cmd_add(a):
             raise Fail("milestone %s is dropped." % milestone)
         after = a.after if a.after is not None else a.parent
         if after:
-            get_task(conn, after)
+            if get_task(conn, after)["status"] == "dropped":
+                raise Fail("T%d is dropped, so a task that waits for it would never open. "
+                           "Give --after 0, or another task." % after)
         cur = conn.execute(
             "INSERT INTO tasks (milestone, parent, after, title, spec, created_by, created_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1529,7 +1556,7 @@ def judge(conn, rows, tdir, sha, log_path, actor):
     green. A check that passes while the milestone's STUB markers remain on trunk
     stays red, and the lead gets a `suspect` event: the check may be too weak."""
     out = []
-    for m, rc, _ in run_checks(conn, rows, tdir, log_path):
+    for m, rc, lg in run_checks(conn, rows, tdir, log_path):
         stubs = milestone_stubs(conn, sha, m["id"]) if rc == 0 else []
         state = "green" if rc == 0 and not stubs else "red"
         with tx(conn):
@@ -1542,7 +1569,7 @@ def judge(conn, rows, tdir, sha, log_path, actor):
             if stubs:
                 log_event(conn, actor, "suspect", "%s check passes, but %d STUB marker(s) remain: %s. "
                           "The check may be too weak." % (m["id"], len(stubs), "; ".join(x[:80] for x in stubs[:3])))
-        out.append((m, rc, stubs))
+        out.append((m, rc, stubs, lg))
     return out
 
 
@@ -1570,6 +1597,13 @@ def run_checks(conn, rows, tdir, log_path):
     logs = [Path("%s.%s.log" % (str(log_path)[:-4], m["id"])) for m in rows]
     with ThreadPoolExecutor(max_workers=jobs) as pool:
         codes = list(pool.map(lambda pair: run_cmd(pair[0]["check_cmd"], tdir, timeout, pair[1]), zip(rows, logs)))
+    if jobs > 1:
+        # Checks that share build output can disturb each other: run each failure again alone.
+        for i, (m, lg) in enumerate(zip(rows, logs)):
+            if codes[i] != 0:
+                with open(lg, "ab") as f:
+                    f.write(b"\n[team-build] failed beside other checks; running it again alone:\n")
+                codes[i] = run_cmd(m["check_cmd"], tdir, timeout, lg)
     return list(zip(rows, codes, logs))
 
 
@@ -1725,9 +1759,7 @@ def cmd_merge_loop(a):
     # Commands a loop killed outright left running: stop them before touching the trunk worktree.
     pgfile = board_dir() / "running.pgids"
     if pgfile.exists():
-        for line in pgfile.read_text().split():
-            kill_group(int(line))
-        pgfile.unlink()
+        stop_leftover_groups(pgfile)
     STOP["pgfile"] = str(pgfile)
     try:
         with trunk_lock():
@@ -1763,9 +1795,11 @@ def cmd_merge_loop(a):
             prepare_trunk_dir(conn, tdir, tip)
             ensure_guard(conn)
             if recovered is not None:
-                judge(conn, red_to_check(conn, recovered["task"]), tdir, tip,
-                      board_dir() / "logs" / ("L%d.log" % recovered["id"]), "queue")
-                reset_trunk_dir(tdir, tip)
+                try:
+                    judge(conn, red_to_check(conn, recovered["task"]), tdir, tip,
+                          board_dir() / "logs" / ("L%d.log" % recovered["id"]), "queue")
+                finally:
+                    reset_trunk_dir(tdir, tip)
             with tx(conn):
                 set_cfg(conn, "trunk_tip", tip)
                 log_event(conn, "queue", "loop", "started (pid %d) at %s" % (os.getpid(), tip[:10]))
@@ -1813,14 +1847,22 @@ def cmd_recheck(a):
                 raise Fail("the trunk worktree has uncommitted changes or new files. Commit or remove them first.")
         else:
             prepare_trunk_dir(conn, tdir, tip)
-        results = judge(conn, rows, tdir, tip, log, "lead")
-        git("reset", "--quiet", "--hard", "HEAD", cwd=tdir)
-        git("clean", "-ffdq", cwd=tdir)
+        try:
+            results = judge(conn, rows, tdir, tip, log, "lead")
+        finally:
+            git("reset", "--quiet", "--hard", "HEAD", cwd=tdir)
+            git("clean", "-ffdq", cwd=tdir)
+    broken = cfg(conn, "trunk_broken", "")
+    for m, rc, _, _ in results:
+        if broken.startswith("the check of green milestone %s " % m["id"]) and rc != 0:
+            with tx(conn):
+                set_cfg(conn, "trunk_broken", "")
+                log_event(conn, "lead", "loop", "%s is red now, so trunk no longer counts as broken" % m["id"])
     all_green = True
-    for m, rc, stubs in results:
+    for m, rc, stubs, lg in results:
         ok = rc == 0 and not stubs
         all_green = all_green and ok
-        why = "" if ok else ("  %d STUB marker(s) remain, so it stays red" % len(stubs) if stubs else "  log " + str(log))
+        why = "" if ok else ("  %d STUB marker(s) remain, so it stays red" % len(stubs) if stubs else "  log " + str(lg))
         print("%-8s %s (exit %d)%s" % (m["id"], "GREEN" if ok else "RED", rc, why))
     print("Trunk %s @ %s. STUB markers: %s." % (trunk, tip[:10], stub_summary(conn, trunk)[1]))
     return 0 if all_green else 1
@@ -2037,6 +2079,9 @@ def main(argv=None):
     except Fail as e:
         print("board: %s" % e, file=sys.stderr)
         return 1
+    except Interrupted:
+        print("board: stopped.", file=sys.stderr)
+        return 130
     except sqlite3.OperationalError as e:
         print("board: database error: %s. Try again." % e, file=sys.stderr)
         return 1
